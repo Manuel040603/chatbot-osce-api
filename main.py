@@ -97,8 +97,7 @@ def get_connection():
         server=DB_SERVER,
         user=DB_USER,
         password=DB_PASS,
-        database=DB_NAME,
-        tds_version="7.0"
+        database=DB_NAME
     )
     return _conn
 
@@ -157,9 +156,9 @@ REGLAS CRITICAS:
     )
     return r.choices[0].message.content.strip()
 
-def interpretar_resultado(pregunta: str, df: pd.DataFrame) -> str:
+def interpretar_resultado(pregunta: str, data: list) -> str:
     client = Groq(api_key=GROQ_API_KEY)
-    datos_str = df.head(20).to_string(index=False) if not df.empty else "Sin resultados"
+    datos_str = str(data[:20]) if data else "Sin resultados"
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
@@ -176,7 +175,7 @@ PROHIBIDO: mencionar SQL, tablas, columnas, bases de datos."""
             },
             {
                 "role": "user",
-                "content": f"Pregunta: {pregunta}\n\nDatos ({len(df)} registros):\n{datos_str}"
+                "content": f"Pregunta: {pregunta}\n\nDatos ({len(data)} registros):\n{datos_str}"
             }
         ],
         temperature=0.4,
@@ -212,27 +211,35 @@ def chat(req: ChatRequest):
         raise HTTPException(400, "Pregunta vacia")
 
     sql = None
-    df  = None
+    data = None
     ultimo_error = None
 
     for intento in range(3):
         try:
             sql_raw = pregunta_a_sql(pregunta, sql if intento > 0 else None)
             sql     = limpiar_sql(sql_raw)
-            df      = run_query(sql)
+            data    = run_query(sql)
             break
         except Exception as e:
             ultimo_error = str(e)
 
-    if df is None:
+    if data is None:
         raise HTTPException(500, f"No pude ejecutar la consulta: {ultimo_error}")
 
-    respuesta = interpretar_resultado(pregunta, df)
-    datos_json = df.head(50).to_dict(orient="records") if not df.empty else []
+    respuesta  = interpretar_resultado(pregunta, data)
+    datos_json = data[:50]
+
+    # Convertir valores no serializables
+    for row in datos_json:
+        for k, v in row.items():
+            if hasattr(v, 'isoformat'):
+                row[k] = v.isoformat()
+            elif not isinstance(v, (str, int, float, bool, type(None))):
+                row[k] = str(v)
 
     return ChatResponse(
         respuesta=respuesta,
         sql=sql,
-        n_registros=len(df),
+        n_registros=len(data),
         datos=datos_json,
     )
