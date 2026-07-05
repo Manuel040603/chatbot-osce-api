@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pymssql
-import pandas as pd
 import re
 from groq import Groq
 import os
@@ -103,8 +102,11 @@ def get_connection():
     )
     return _conn
 
-def run_query(sql: str) -> pd.DataFrame:
-    return pd.read_sql(sql, get_connection())
+def run_query(sql: str) -> list:
+    conn = get_connection()
+    cursor = conn.cursor(as_dict=True)
+    cursor.execute(sql)
+    return cursor.fetchall()
 
 def limpiar_sql(sql: str) -> str:
     sql = re.sub(r"```sql|```", "", sql, flags=re.IGNORECASE).strip()
