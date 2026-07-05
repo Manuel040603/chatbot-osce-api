@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import pyodbc
+import pymssql
 import pandas as pd
 import re
 from groq import Groq
@@ -94,13 +94,13 @@ def get_connection():
             return _conn
     except:
         _conn = None
-    conn_str = (
-        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-        f"SERVER={DB_SERVER};DATABASE={DB_NAME};"
-        f"UID={DB_USER};PWD={DB_PASS};"
-        f"Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+    _conn = pymssql.connect(
+        server=DB_SERVER,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        tds_version="7.0"
     )
-    _conn = pyodbc.connect(conn_str)
     return _conn
 
 def run_query(sql: str) -> pd.DataFrame:
