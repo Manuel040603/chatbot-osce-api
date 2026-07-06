@@ -282,6 +282,7 @@
     <p>Contrataciones Públicas Peru 2022–2025</p>
   </div>
   <div class="status-dot" id="statusDot" title="Conectado"></div>
+  <span onclick="limpiarHistorial()" title="Limpiar historial" style="cursor:pointer;font-size:14px;margin-left:8px;opacity:0.6;">🗑️</span>
 </div>
 
 <!-- Messages -->
@@ -335,6 +336,7 @@
     div.innerHTML = html;
     messagesEl.appendChild(div);
     scrollDown();
+    guardarEstado();
     return div;
   }
 
@@ -359,6 +361,43 @@
 
   // Guarda los últimos datos por cada respuesta, para poder descargarlos en CSV
   const datosPorRespuesta = {};
+
+  // ── Persistencia del historial (localStorage) ──────────────
+  const STORAGE_KEY_HTML  = "osce_chat_historial";
+  const STORAGE_KEY_DATOS = "osce_chat_datos";
+
+  function guardarEstado() {
+    try {
+      localStorage.setItem(STORAGE_KEY_HTML, messagesEl.innerHTML);
+      localStorage.setItem(STORAGE_KEY_DATOS, JSON.stringify(datosPorRespuesta));
+    } catch (e) {
+      // localStorage no disponible (ej. sandbox de Power BI) -> seguimos sin persistencia
+    }
+  }
+
+  function restaurarEstado() {
+    try {
+      const historial = localStorage.getItem(STORAGE_KEY_HTML);
+      const datos     = localStorage.getItem(STORAGE_KEY_DATOS);
+      if (historial) {
+        messagesEl.innerHTML = historial;
+      }
+      if (datos) {
+        Object.assign(datosPorRespuesta, JSON.parse(datos));
+      }
+    } catch (e) {
+      // ignorar si falla
+    }
+  }
+
+  function limpiarHistorial() {
+    try {
+      localStorage.removeItem(STORAGE_KEY_HTML);
+      localStorage.removeItem(STORAGE_KEY_DATOS);
+    } catch (e) {}
+    messagesEl.innerHTML = "";
+    Object.keys(datosPorRespuesta).forEach(k => delete datosPorRespuesta[k]);
+  }
 
   function buildTable(datos) {
     if (!datos || datos.length === 0) return "";
@@ -472,6 +511,10 @@
       inputEl.focus();
     }
   }
+
+  // Restaurar historial guardado (si existe) antes de verificar conexión
+  restaurarEstado();
+  scrollDown();
 
   // Verificar conexión al cargar
   fetch(API_URL.replace("/chat", "/health"))
