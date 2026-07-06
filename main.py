@@ -1,13 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import pymssql
+import pyodbc
+import pandas as pd
 import re
 from groq import Groq
 import os
 
 app = FastAPI(title="Chatbot OSCE API")
 
+# ── CORS (permite que Power BI llame a esta API) ───────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,11 +17,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
-DB_SERVER    = os.getenv("DB_SERVER",    "osce-server-unmsm.database.windows.net")
-DB_NAME      = os.getenv("DB_NAME",      "OECE_DW_1")
-DB_USER      = os.getenv("DB_USER",      "adminosce")
-DB_PASS      = os.getenv("DB_PASS",      "Osce2026!")
+# ── Config (usa variables de entorno en Railway, sin defaults) ──
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+DB_SERVER    = os.getenv("DB_SERVER")
+DB_NAME      = os.getenv("DB_NAME")
+DB_USER      = os.getenv("DB_USER")
+DB_PASS      = os.getenv("DB_PASS")
 
 SCHEMA_CONTEXT = """
 Base de datos SQL Server: OECE_DW_1
@@ -72,6 +75,10 @@ dw.vwContratoProveedorBI - vista BI con datos de proveedor por contrato
   ContratoKey, ProveedorKey, RucProveedor, NombreProveedorEstandar
   CantidadProveedores, PesoProveedor, MontoContrato, MontoProrrateado
 
+NOTA FRAUDE: Si existe la tabla dw.FactFraude, tiene columnas:
+  ContratoKey, ScoreFraude (0.0-1.0), EsFraude (bit), MotivosRiesgo (nvarchar)
+  Unirla con FactContrato via ContratoKey para consultas de riesgo.
+
 RELACIONES CLAVE:
 - FactContrato.EntidadKey -> DimEntidad.EntidadKey
 - FactContrato.FechaFirmaKey -> DimFecha.FechaKey
@@ -83,6 +90,7 @@ RELACIONES CLAVE:
 - BridgeContratoProveedor.ProveedorKey -> DimProveedor.ProveedorKey
 """
 
+# ── Conexion a Azure SQL ────────────────────────────────────────
 _conn = None
 
 def get_connection():
@@ -93,20 +101,19 @@ def get_connection():
             return _conn
     except:
         _conn = None
-    _conn = pymssql.connect(
-        server=DB_SERVER,
-        user=DB_USER,
-        password=DB_PASS,
-        database=DB_NAME
+    conn_str = (
+        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+        f"SERVER={DB_SERVER};DATABASE={DB_NAME};"
+        f"UID={DB_USER};PWD={DB_PASS};"
+        f"Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
     )
+    _conn = pyodbc.connect(conn_str)
     return _conn
 
-def run_query(sql: str) -> list:
-    conn = get_connection()
-    cursor = conn.cursor(as_dict=True)
-    cursor.execute(sql)
-    return cursor.fetchall()
+def run_query(sql: str) -> pd.DataFrame:
+    return pd.read_sql(sql, get_connection())
 
+# ── Limpieza SQL ───────────────────────────────────────────────
 def limpiar_sql(sql: str) -> str:
     sql = re.sub(r"```sql|```", "", sql, flags=re.IGNORECASE).strip()
     top_al_final = re.search(
@@ -123,6 +130,7 @@ def limpiar_sql(sql: str) -> str:
         sql = re.sub(r'^SELECT\s+', 'SELECT TOP 100 ', sql, flags=re.IGNORECASE)
     return sql.strip()
 
+# ── Groq: pregunta → SQL ───────────────────────────────────────
 def pregunta_a_sql(pregunta: str, sql_con_error: str = None) -> str:
     client = Groq(api_key=GROQ_API_KEY)
     system_prompt = f"""Eres un experto en SQL Server. Convierte preguntas en lenguaje natural a SQL valido para SQL Server.
@@ -143,7 +151,7 @@ REGLAS CRITICAS:
         messages += [
             {"role": "user",      "content": pregunta},
             {"role": "assistant", "content": sql_con_error},
-            {"role": "user",      "content": "Ese SQL dio error. Corrigelo y genera uno nuevo."},
+            {"role": "user",      "content": "Ese SQL dio error. Corrígelo y genera uno nuevo."},
         ]
     else:
         messages.append({"role": "user", "content": pregunta})
@@ -156,26 +164,33 @@ REGLAS CRITICAS:
     )
     return r.choices[0].message.content.strip()
 
-def interpretar_resultado(pregunta: str, data: list) -> str:
+# ── Groq: datos → narrativa ────────────────────────────────────
+def interpretar_resultado(pregunta: str, df: pd.DataFrame) -> str:
     client = Groq(api_key=GROQ_API_KEY)
-    datos_str = str(data[:20]) if data else "Sin resultados"
+    datos_str = df.head(20).to_string(index=False) if not df.empty else "Sin resultados"
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {
                 "role": "system",
                 "content": """Eres un analista senior de inteligencia de negocios especializado en contrataciones publicas del Peru (OSCE/SEACE 2022-2025).
-Redacta respuestas en forma de analisis narrativo ejecutivo en espanol.
-- Prosa continua, sin etiquetas como Analisis: o Hallazgos:
-- Datos concretos: nombres, montos exactos, fechas, porcentajes
+
+Redacta respuestas en forma de analisis narrativo ejecutivo, fluido y profesional en espanol.
+
+ESTILO:
+- Escribe en prosa continua, sin etiquetas como "Analisis:", "Contexto:", "Hallazgos:"
+- Responde directamente con datos concretos: nombres, montos exactos, fechas, porcentajes
+- Si hay multiples elementos destacados, usa viñetas breves SIN encabezados previos
+- Cuando detectes algo inusual (concentracion, montos atipicos, contratacion directa), menciónalo
 - Usa S/ para soles y US$ para dolares
-- Al final en cursiva sugiere una pregunta de profundizacion
+- Al final, en cursiva, sugiere una pregunta de profundizacion relevante
 - Maximo 200 palabras
+
 PROHIBIDO: mencionar SQL, tablas, columnas, bases de datos."""
             },
             {
                 "role": "user",
-                "content": f"Pregunta: {pregunta}\n\nDatos ({len(data)} registros):\n{datos_str}"
+                "content": f"Pregunta: {pregunta}\n\nDatos ({len(df)} registros):\n{datos_str}"
             }
         ],
         temperature=0.4,
@@ -183,6 +198,7 @@ PROHIBIDO: mencionar SQL, tablas, columnas, bases de datos."""
     )
     return r.choices[0].message.content.strip()
 
+# ── Modelos de request/response ────────────────────────────────
 class ChatRequest(BaseModel):
     pregunta: str
 
@@ -192,6 +208,7 @@ class ChatResponse(BaseModel):
     n_registros: int
     datos: list
 
+# ── Endpoints ──────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {"status": "ok", "servicio": "Chatbot OSCE - Contrataciones Publicas Peru"}
@@ -208,38 +225,33 @@ def health():
 def chat(req: ChatRequest):
     pregunta = req.pregunta.strip()
     if not pregunta:
-        raise HTTPException(400, "Pregunta vacia")
+        raise HTTPException(400, "Pregunta vacía")
 
     sql = None
-    data = None
+    df  = None
     ultimo_error = None
 
     for intento in range(3):
         try:
             sql_raw = pregunta_a_sql(pregunta, sql if intento > 0 else None)
             sql     = limpiar_sql(sql_raw)
-            data    = run_query(sql)
+            df      = run_query(sql)
             break
         except Exception as e:
             ultimo_error = str(e)
 
-    if data is None:
+    if df is None:
         raise HTTPException(500, f"No pude ejecutar la consulta: {ultimo_error}")
 
-    respuesta  = interpretar_resultado(pregunta, data)
-    datos_json = data[:50]
+    respuesta = interpretar_resultado(pregunta, df)
 
-    # Convertir valores no serializables
-    for row in datos_json:
-        for k, v in row.items():
-            if hasattr(v, 'isoformat'):
-                row[k] = v.isoformat()
-            elif not isinstance(v, (str, int, float, bool, type(None))):
-                row[k] = str(v)
+    datos_json = []
+    if not df.empty:
+        datos_json = df.head(100).to_dict(orient="records")
 
     return ChatResponse(
         respuesta=respuesta,
         sql=sql,
-        n_registros=len(data),
+        n_registros=len(df),
         datos=datos_json,
     )
