@@ -68,12 +68,15 @@ dw.DimMetodoContratacion - metodos de contratacion
 dw.DimMoneda - monedas
   MonedaKey, ClaveMoneda, CodigoMoneda, NombreMoneda
 
-dw.BridgeContratoProveedor - relacion contrato-proveedor (muchos a muchos)
+dw.BridgeContratoProveedor - relacion contrato-proveedor
   ContratoKey, ProveedorKey, RucProveedor, NombreProveedorOriginal, NombreProveedorEstandar
 
 dw.vwContratoProveedorBI - vista BI con datos de proveedor por contrato
   ContratoKey, ProveedorKey, RucProveedor, NombreProveedorEstandar
   CantidadProveedores, PesoProveedor, MontoContrato, MontoProrrateado
+
+dw.ValorMoneda - tipo de cambio a Soles (PEN) por moneda
+  MonedaKey, NombreMoneda, TipodeCambio
 
 NOTA FRAUDE: Si existe la tabla dw.FactFraude, tiene columnas:
   ContratoKey, ScoreFraude (0.0-1.0), EsFraude (bit), MotivosRiesgo (nvarchar)
@@ -85,9 +88,53 @@ RELACIONES CLAVE:
 - FactContrato.CategoriaKey -> DimCategoria.CategoriaKey
 - FactContrato.MetodoKey -> DimMetodoContratacion.MetodoKey
 - FactContrato.MonedaKey -> DimMoneda.MonedaKey
+- FactContrato.MonedaKey -> ValorMoneda.MonedaKey (para tipo de cambio)
 - FactContrato.UbicacionEntidadKey -> DimUbicacion.UbicacionKey
 - BridgeContratoProveedor.ContratoKey -> FactContrato.ContratoKey
 - BridgeContratoProveedor.ProveedorKey -> DimProveedor.ProveedorKey
+  (FactContrato NO tiene ProveedorKey directo; el vinculo a proveedor
+  SIEMPRE pasa por BridgeContratoProveedor)
+
+═══════════════════════════════════════════════════════════════
+REGLAS DE NEGOCIO OBLIGATORIAS (replican EXACTO el reporte Power BI
+oficial del proyecto - aplican SIEMPRE, el usuario no necesita pedirlas):
+═══════════════════════════════════════════════════════════════
+
+1. MONTO EN SOLES (conversion de moneda obligatoria):
+   El "monto final" que se reporta SIEMPRE es MontoContrato convertido a
+   soles, NUNCA la columna MontoFinal (esa columna no se usa en el reporte
+   oficial). Formula exacta:
+       fc.MontoContrato * vm.TipodeCambio
+   Requiere JOIN: INNER JOIN dw.ValorMoneda vm ON fc.MonedaKey = vm.MonedaKey
+   Si una pregunta pide "monto", "monto total", "monto final" -> usa SIEMPRE
+   esta formula convertida, nunca sumes MontoContrato o MontoFinal sin convertir.
+
+2. SOLO CONTRATOS VALIDOS:
+   Un contrato es "valido" solo si su fecha de fin ya paso respecto a hoy.
+   Agrega SIEMPRE en el WHERE:
+       AND fc.FechaFin < CAST(GETDATE() AS DATE)
+   (Este resultado cambia dia a dia porque depende de la fecha actual,
+   es el comportamiento correcto y esperado, igual que en Power BI.)
+
+3. SOLO CONTRATOS CON PROVEEDOR VINCULADO ("Aplica"):
+   Un contrato solo cuenta si tiene un proveedor vinculado en
+   BridgeContratoProveedor. Agrega SIEMPRE:
+       INNER JOIN dw.BridgeContratoProveedor bcp ON fc.ContratoKey = bcp.ContratoKey
+       INNER JOIN dw.DimProveedor dp ON bcp.ProveedorKey = dp.ProveedorKey
+   (el INNER JOIN ya excluye automaticamente los contratos sin proveedor)
+
+EJEMPLO DE QUERY CORRECTO COMPLETO:
+SELECT
+    SUM(fc.MontoContrato * vm.TipodeCambio) AS MontoTotal,
+    COUNT(fc.ContratoKey) AS CantidadContratos
+FROM dw.FactContrato fc
+INNER JOIN dw.DimFecha dfe ON fc.FechaFirmaKey = dfe.FechaKey
+INNER JOIN dw.ValorMoneda vm ON fc.MonedaKey = vm.MonedaKey
+INNER JOIN dw.BridgeContratoProveedor bcp ON fc.ContratoKey = bcp.ContratoKey
+INNER JOIN dw.DimProveedor dp ON bcp.ProveedorKey = dp.ProveedorKey
+WHERE fc.NombreEntidadOriginal = 'NOMBRE EXACTO DE LA ENTIDAD'
+    AND dfe.Anio = 2022
+    AND fc.FechaFin < CAST(GETDATE() AS DATE)
 """
 
 # ── Conexion a Azure SQL (via pymssql / FreeTDS) ────────────────
@@ -145,10 +192,17 @@ REGLAS CRITICAS:
 1. Responde SOLO con SQL puro, sin markdown, sin explicaciones
 2. TOP va SIEMPRE despues de SELECT: "SELECT TOP 100 col FROM tabla ORDER BY col DESC"
 3. Alias fijos: fc=FactContrato, de=DimEntidad, dp=DimProveedor, dfe=DimFecha,
-   du=DimUbicacion, dca=DimCategoria, dm=DimMetodoContratacion, dmo=DimMoneda, bcp=BridgeContratoProveedor
+   du=DimUbicacion, dca=DimCategoria, dm=DimMetodoContratacion, dmo=DimMoneda,
+   bcp=BridgeContratoProveedor, vm=ValorMoneda
 4. Schema dw. siempre antes del nombre de tabla
 5. LIMIT no existe en SQL Server, usa TOP
-6. Si no puedes responder: SELECT 'No tengo datos para esa consulta' AS mensaje"""
+6. Si no puedes responder: SELECT 'No tengo datos para esa consulta' AS mensaje
+7. OBLIGATORIO en TODA consulta que involucre montos, conteo de contratos,
+   o cualquier metrica agregada de FactContrato: aplica las 3 reglas de negocio
+   de la seccion "REGLAS DE NEGOCIO OBLIGATORIAS" de arriba (conversion a soles
+   via ValorMoneda, filtro de contrato valido por fecha, join a proveedor).
+   Esto aplica incluso si el usuario no las menciona explicitamente en su pregunta.
+   NUNCA sumes MontoContrato o MontoFinal sin multiplicar por TipodeCambio."""
 
     messages = [{"role": "system", "content": system_prompt}]
     if sql_con_error:
