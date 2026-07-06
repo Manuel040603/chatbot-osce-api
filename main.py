@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import pyodbc
+import pymssql
 import pandas as pd
 import re
 from groq import Groq
@@ -90,24 +90,28 @@ RELACIONES CLAVE:
 - BridgeContratoProveedor.ProveedorKey -> DimProveedor.ProveedorKey
 """
 
-# ── Conexion a Azure SQL ────────────────────────────────────────
+# ── Conexion a Azure SQL (via pymssql / FreeTDS) ────────────────
 _conn = None
 
 def get_connection():
     global _conn
     try:
         if _conn:
-            _conn.cursor().execute("SELECT 1")
+            cur = _conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchall()
             return _conn
-    except:
+    except Exception:
         _conn = None
-    conn_str = (
-        f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-        f"SERVER={DB_SERVER};DATABASE={DB_NAME};"
-        f"UID={DB_USER};PWD={DB_PASS};"
-        f"Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+    _conn = pymssql.connect(
+        server=DB_SERVER,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        as_dict=False,
+        login_timeout=30,
+        timeout=30,
     )
-    _conn = pyodbc.connect(conn_str)
     return _conn
 
 def run_query(sql: str) -> pd.DataFrame:
