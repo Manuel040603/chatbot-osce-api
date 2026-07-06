@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<style>
+  /* ── Reset & base ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0f1923;
+    color: #e8edf2;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  .header {
+    background: linear-gradient(135deg, #1a2a3a 0%, #0d1f2d 100%);
+    border-bottom: 2px solid #c8a84b;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .header-icon {
+    width: 32px; height: 32px;
+    background: #c8a84b;
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  .header-text h1 {
+    font-size: 13px;
+    font-weight: 700;
+    color: #c8a84b;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .header-text p {
+    font-size: 10px;
+    color: #7a9bb5;
+    margin-top: 1px;
+  }
+  .status-dot {
+    width: 7px; height: 7px;
+    background: #2ecc71;
+    border-radius: 50%;
+    margin-left: auto;
+    box-shadow: 0 0 6px #2ecc71;
+  }
+
+  /* ── Messages ── */
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    scrollbar-width: thin;
+    scrollbar-color: #2a3f55 transparent;
+  }
+  .messages::-webkit-scrollbar { width: 4px; }
+  .messages::-webkit-scrollbar-track { background: transparent; }
+  .messages::-webkit-scrollbar-thumb { background: #2a3f55; border-radius: 4px; }
+
+  /* ── Bubble ── */
+  .bubble {
+    max-width: 88%;
+    padding: 10px 13px;
+    border-radius: 12px;
+    font-size: 12px;
+    line-height: 1.6;
+    animation: fadeIn 0.25s ease;
+  }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+
+  .bubble.bot {
+    background: #1a2f42;
+    border: 1px solid #2a4560;
+    border-left: 3px solid #c8a84b;
+    align-self: flex-start;
+    color: #cdd9e5;
+  }
+  .bubble.user {
+    background: #c8a84b;
+    color: #0f1923;
+    align-self: flex-end;
+    font-weight: 600;
+    border-radius: 12px 12px 3px 12px;
+  }
+  .bubble.error {
+    background: #2d1515;
+    border: 1px solid #7c2020;
+    border-left: 3px solid #e74c3c;
+    align-self: flex-start;
+    color: #e8a0a0;
+  }
+
+  /* ── Typing indicator ── */
+  .typing {
+    display: flex; gap: 5px; padding: 12px 14px;
+    background: #1a2f42; border: 1px solid #2a4560;
+    border-left: 3px solid #c8a84b;
+    border-radius: 12px; align-self: flex-start;
+    animation: fadeIn 0.2s ease;
+  }
+  .typing span {
+    width: 7px; height: 7px;
+    background: #c8a84b; border-radius: 50%;
+    animation: bounce 1.2s infinite;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce {
+    0%,80%,100% { transform: translateY(0); opacity:.5; }
+    40%          { transform: translateY(-6px); opacity:1; }
+  }
+
+  /* ── Meta info del bot ── */
+  .meta {
+    font-size: 10px;
+    color: #4a6a85;
+    margin-top: 6px;
+    display: flex; gap: 10px; flex-wrap: wrap;
+  }
+  .meta span { display: flex; align-items: center; gap: 3px; }
+
+  /* ── SQL toggle ── */
+  .sql-toggle {
+    font-size: 10px;
+    color: #c8a84b;
+    cursor: pointer;
+    margin-top: 6px;
+    display: inline-block;
+    text-decoration: underline;
+    opacity: 0.7;
+  }
+  .sql-toggle:hover { opacity: 1; }
+  .sql-box {
+    display: none;
+    background: #0a1520;
+    border: 1px solid #2a4560;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-top: 6px;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 10px;
+    color: #7ec8e3;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  /* ── Sugerencias ── */
+  .suggestions {
+    padding: 8px 12px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    border-top: 1px solid #1e3348;
+  }
+  .chip {
+    background: #1a2f42;
+    border: 1px solid #2a4560;
+    color: #7a9bb5;
+    font-size: 10px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  .chip:hover {
+    background: #c8a84b;
+    color: #0f1923;
+    border-color: #c8a84b;
+  }
+
+  /* ── Input area ── */
+  .input-area {
+    padding: 10px 12px;
+    border-top: 1px solid #1e3348;
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+    background: #0f1923;
+  }
+  .input-area input {
+    flex: 1;
+    background: #1a2f42;
+    border: 1px solid #2a4560;
+    border-radius: 8px;
+    color: #e8edf2;
+    font-size: 12px;
+    padding: 8px 12px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .input-area input::placeholder { color: #4a6a85; }
+  .input-area input:focus { border-color: #c8a84b; }
+  .input-area input:disabled { opacity: 0.5; }
+
+  .send-btn {
+    background: #c8a84b;
+    border: none;
+    border-radius: 8px;
+    width: 36px; height: 36px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+  .send-btn:hover:not(:disabled) { background: #e0c06a; transform: scale(1.05); }
+  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .send-btn svg { width: 16px; height: 16px; fill: #0f1923; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-icon">🏛️</div>
+  <div class="header-text">
+    <h1>Asistente OSCE</h1>
+    <p>Contrataciones Públicas Peru 2022–2025</p>
+  </div>
+  <div class="status-dot" id="statusDot" title="Conectado"></div>
+</div>
+
+<!-- Messages -->
+<div class="messages" id="messages">
+  <div class="bubble bot">
+    👋 Hola, soy el asistente de contrataciones públicas del Perú.<br><br>
+    Puedo analizar contratos, entidades, proveedores, montos y tendencias del dataset OSCE/SEACE 2022–2025.<br><br>
+    ¿Qué quieres saber?
+  </div>
+</div>
+
+<!-- Sugerencias -->
+<div class="suggestions">
+  <div class="chip" onclick="sendChip(this)">Top 10 proveedores</div>
+  <div class="chip" onclick="sendChip(this)">Contratos por año</div>
+  <div class="chip" onclick="sendChip(this)">Monto total por departamento</div>
+  <div class="chip" onclick="sendChip(this)">Método más usado</div>
+  <div class="chip" onclick="sendChip(this)">Contratos con riesgo de fraude</div>
+</div>
+
+<!-- Input -->
+<div class="input-area">
+  <input
+    type="text"
+    id="inputPregunta"
+    placeholder="Escribe tu pregunta sobre contratos públicos..."
+    onkeydown="if(event.key==='Enter') enviar()"
+  />
+  <button class="send-btn" id="sendBtn" onclick="enviar()">
+    <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+  </button>
+</div>
+
+<script>
+  // ── CAMBIA ESTA URL CUANDO DEPLOYS EN RAILWAY ──────────────
+  const API_URL = "https://chatbot-osce-api-production.up.railway.app/chat";
+  // ───────────────────────────────────────────────────────────
+
+  const messagesEl = document.getElementById("messages");
+  const inputEl    = document.getElementById("inputPregunta");
+  const sendBtn    = document.getElementById("sendBtn");
+  const statusDot  = document.getElementById("statusDot");
+
+  function scrollDown() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function addBubble(type, html) {
+    const div = document.createElement("div");
+    div.className = `bubble ${type}`;
+    div.innerHTML = html;
+    messagesEl.appendChild(div);
+    scrollDown();
+    return div;
+  }
+
+  function addTyping() {
+    const div = document.createElement("div");
+    div.className = "typing";
+    div.id = "typing";
+    div.innerHTML = "<span></span><span></span><span></span>";
+    messagesEl.appendChild(div);
+    scrollDown();
+  }
+
+  function removeTyping() {
+    const t = document.getElementById("typing");
+    if (t) t.remove();
+  }
+
+  function toggleSQL(id) {
+    const box = document.getElementById(id);
+    box.style.display = box.style.display === "block" ? "none" : "block";
+  }
+
+  function sendChip(el) {
+    inputEl.value = el.textContent;
+    enviar();
+  }
+
+  async function enviar() {
+    const pregunta = inputEl.value.trim();
+    if (!pregunta) return;
+
+    inputEl.value = "";
+    inputEl.disabled = true;
+    sendBtn.disabled = true;
+
+    addBubble("user", pregunta);
+    addTyping();
+
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pregunta })
+      });
+
+      removeTyping();
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        addBubble("error", `❌ Error del servidor: ${err.detail || res.statusText}`);
+        return;
+      }
+
+      const data = await res.json();
+      const uid  = "sql_" + Date.now();
+
+      const html = `
+        ${data.respuesta.replace(/\n/g, "<br>")}
+        <div class="meta">
+          <span>📊 ${data.n_registros} registros</span>
+        </div>
+        <span class="sql-toggle" onclick="toggleSQL('${uid}')">🔍 Ver SQL generado</span>
+        <div class="sql-box" id="${uid}">${data.sql}</div>
+      `;
+      addBubble("bot", html);
+
+    } catch (e) {
+      removeTyping();
+      addBubble("error", `❌ No pude conectar con el servidor.<br><small>${e.message}</small>`);
+      statusDot.style.background = "#e74c3c";
+      statusDot.style.boxShadow  = "0 0 6px #e74c3c";
+    } finally {
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  // Verificar conexión al cargar
+  fetch(API_URL.replace("/chat", "/health"))
+    .then(r => r.json())
+    .then(d => {
+      if (d.status !== "ok") throw new Error();
+    })
+    .catch(() => {
+      statusDot.style.background = "#f39c12";
+      statusDot.style.boxShadow  = "0 0 6px #f39c12";
+      statusDot.title = "API no configurada aún";
+    });
+</script>
+</body>
+</html>
