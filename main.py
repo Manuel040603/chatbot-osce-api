@@ -177,7 +177,17 @@ def limpiar_sql(sql: str) -> str:
     if not re.search(r'SELECT\s+TOP\s+\d+', sql, re.IGNORECASE):
         sql = re.sub(r'^SELECT\s+', 'SELECT TOP 100 ', sql, flags=re.IGNORECASE)
 
-    return sql.strip()
+    sql = sql.strip()
+
+    # Seguridad: solo se permite ejecutar SELECT. Cualquier otra sentencia
+    # (DROP, DELETE, UPDATE, INSERT, ALTER, TRUNCATE, EXEC) se bloquea aqui,
+    # sin importar si vino del modelo o de un intento de inyeccion en la pregunta.
+    if not re.match(r'^SELECT\b', sql, re.IGNORECASE):
+        raise ValueError("Solo se permiten consultas SELECT")
+    if re.search(r'\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|EXEC|MERGE)\b', sql, re.IGNORECASE):
+        raise ValueError("Consulta bloqueada por seguridad: contiene una palabra clave no permitida")
+
+    return sql
 
 
 # ── Groq: pregunta → SQL ───────────────────────────────────────
@@ -197,7 +207,17 @@ REGLAS CRITICAS:
 5. LIMIT no existe en SQL Server, usa TOP
 6. Para unir HECHOS_PROCESO con SCORES_RIESGO usa: hp.ocid = sr.ocid (join directo, NUNCA recortar
    ni transformar el ocid, ambas columnas ya tienen el mismo formato)
-7. Si no puedes responder: SELECT 'No tengo datos para esa consulta' AS mensaje"""
+7. ENRIQUECIMIENTO OBLIGATORIO (aplica a TODA pregunta que use HECHOS_PROCESO, no solo riesgo/score):
+   si la consulta trae filas de HECHOS_PROCESO, agrega SIEMPRE en el SELECT el nombre de la
+   entidad (JOIN dbo.DIM_ENTIDAD de -> de.buyer_name) y el nombre del proveedor
+   (JOIN dbo.DIM_PROVEEDOR dp -> dp.proveedor_nombre), aunque la pregunta no los mencione
+   explicitamente. Si la pregunta involucra fechas o periodos, agrega tambien JOIN a
+   dbo.DIM_TIEMPO dt para mostrar dt.anio y dt.nombre_mes. Si involucra tipo de contratacion,
+   agrega JOIN a dbo.DIM_PROCEDIMIENTO dpr para mostrar dpr.metodo_detalle. NUNCA devuelvas
+   solo entidad_key, proveedor_key, proc_key o fecha_key sin su nombre/descripcion asociada.
+8. Al unir HECHOS_PROCESO con DIM_GEOGRAFIA usa LEFT JOIN dbo.DIM_GEOGRAFIA dg ON hp.geo_key =
+   dg.geo_key (dg puede tener columnas NULL; un INNER JOIN descartaria filas validas)
+9. Si no puedes responder: SELECT 'No tengo datos para esa consulta' AS mensaje"""
 
     messages = [{"role": "system", "content": system_prompt}]
 
