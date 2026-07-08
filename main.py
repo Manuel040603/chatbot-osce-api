@@ -25,69 +25,111 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 
 SCHEMA_CONTEXT = """
-Base de datos SQL Server: OECE_DW_1
-Contiene datos de contrataciones publicas del Peru (OSCE/SEACE) 2022-2025.
+Base de datos SQL Server. Schema: dbo.
+Contiene datos de contrataciones publicas del Peru (OSCE/SEACE), con analisis
+de riesgo/anomalia. Esquema verificado via INFORMATION_SCHEMA.COLUMNS.
 
-TABLAS PRINCIPALES (schema: dw):
+⚠️ IMPORTANTE: usa EXCLUSIVAMENTE las tablas y columnas listadas abajo, con el
+schema "dbo." y estos nombres EXACTOS (respeta mayusculas/minusculas). NUNCA
+inventes ni asumas nombres de tabla o columna que no esten en esta lista.
 
-dw.FactContrato - tabla de hechos principal
-  ContratoKey, ClaveContrato, Ocid, IdContrato, IdAdjudicacion, IdLicitacion
-  EntidadKey, UbicacionEntidadKey, MonedaKey, CategoriaKey, MetodoKey
-  FechaFirmaKey, FechaInicioKey, FechaFinKey
-  TituloContrato, DescripcionContrato
-  FechaFirma, FechaInicio, FechaFin, DuracionDias
-  MontoContrato (decimal), MontoFinal (decimal), MontoLicitacion (decimal)
-  MonedaContrato, NombreMonedaContrato
-  NombreEntidadOriginal, NombreEntidadEstandar, RucEntidad
-  MetodoContratacion, DetalleMetodoContratacion
-  CategoriaPrincipal
-  AnioArchivo, MesArchivo
+dbo.HECHOS_PROCESO - tabla de hechos principal (un registro por proceso de contratacion)
+  ocid                        (varchar) identificador unico del proceso, PK logica
+  entidad_key                 (bigint)  FK -> dbo.DIM_ENTIDAD.entidad_key
+  proveedor_key               (bigint)  FK -> dbo.DIM_PROVEEDOR.proveedor_key
+  proc_key                    (bigint)  FK -> dbo.DIM_PROCEDIMIENTO.proc_key
+  geo_key                     (bigint)  FK -> dbo.DIM_GEOGRAFIA.geo_key
+  fecha_convocatoria_key       (bigint)  FK -> dbo.DIM_TIEMPO.fecha_key (fecha de convocatoria)
+  fecha_adjudicacion_key       (bigint)  FK -> dbo.DIM_TIEMPO.fecha_key (fecha de adjudicacion)
+  n_oferentes                 (bigint)  cantidad de oferentes/postores
+  monto_adjudicado            (float)   monto final adjudicado
+  valor_referencial           (float)   valor referencial del proceso
+  brecha_adj_ref               (float)   diferencia entre monto adjudicado y valor referencial
+  n_awards                    (bigint)
+  n_proveedores_distintos      (bigint)
+  n_miembros_consorcio         (bigint)
+  tiempo_decision              (bigint)  dias entre convocatoria y adjudicacion
+  es_postor_unico              (bit)
+  es_postor_unico_competitivo   (bit)
+  es_directo                   (bit)     contratacion directa (sin concurso)
+  ganador_sancionado_historial  (bit)
+  ganador_reincidente           (bit)
+  sancionado_post_adjudicacion  (bit)
+  concentracion_economica_ent_prov (float)
+  dependencia_prov_ent          (float)
+  tasa_exito_ganador             (float)
+  n_postulaciones_par           (bigint)
+  n_adj_par_anio                (bigint)
+  ganador_recurrente_entidad     (bigint)
+  ganador_recurrente_global      (bigint)
 
-dw.DimEntidad - entidades contratantes
-  EntidadKey, ClaveOrganizacion, Ruc, NombreOriginal, NombreEstandar
-  TipoOrganizacion, Departamento, Region, Localidad, Pais
-  EsEntidad (bit), EsProveedor (bit)
+dbo.DIM_ENTIDAD - entidades contratantes (compradoras)
+  entidad_key    (bigint)  PK
+  buyer_id       (varchar) codigo de la entidad
+  buyer_name     (varchar) nombre de la entidad compradora -> usar SIEMPRE con LIKE + UPPER
 
-dw.DimProveedor - proveedores
-  ProveedorKey, ClaveOrganizacion, Ruc, NombreOriginal, NombreEstandar
-  TipoOrganizacion, Departamento, Region, Localidad
+dbo.DIM_PROVEEDOR - proveedores
+  proveedor_key       (bigint)  PK
+  proveedor_id         (varchar)
+  proveedor_nombre     (varchar) nombre del proveedor -> usar SIEMPRE con LIKE + UPPER
+  es_consorcio         (bit)
+  prov_origen          (varchar)
+  prov_departamento    (varchar) departamento de origen del PROVEEDOR (no del proceso)
+  prov_provincia       (varchar)
+  prov_distrito        (varchar)
 
-dw.DimFecha - dimension tiempo
-  FechaKey, Fecha, Anio, Semestre, Trimestre, MesNumero, MesNombre
-  AnioMes, Dia, EsFinSemana
+dbo.DIM_GEOGRAFIA - ubicacion geografica del PROCESO/contrato
+  geo_key             (bigint)  PK
+  prov_departamento    (varchar) departamento donde ocurre el proceso
+  prov_provincia       (varchar)
+  prov_distrito        (varchar)
 
-dw.DimUbicacion - geografia
-  UbicacionKey, ClaveUbicacion, Pais, Departamento, Region, Localidad
+dbo.DIM_PROCEDIMIENTO - metodo/tipo de procedimiento de contratacion
+  proc_key         (bigint)  PK
+  metodo           (varchar) metodo de contratacion
+  metodo_detalle    (varchar)
+  categoria        (varchar) categoria del proceso/contratacion
 
-dw.DimCategoria - categorias de contratacion
-  CategoriaKey, ClaveCategoria, CategoriaPrincipal
+dbo.DIM_TIEMPO - dimension tiempo (se usa DOS VECES desde HECHOS_PROCESO:
+  una para fecha_convocatoria_key y otra para fecha_adjudicacion_key.
+  Si la pregunta necesita ambas fechas, usa DOS alias distintos, ej:
+  dt_conv y dt_adj, cada uno con su propio JOIN a dbo.DIM_TIEMPO)
+  fecha_key    (bigint)  PK
+  fecha        (datetime)
+  anio         (int)
+  mes          (int)
+  trimestre    (int)
+  nombre_mes   (varchar)
 
-dw.DimMetodoContratacion - metodos de contratacion
-  MetodoKey, ClaveMetodo, MetodoContratacion, DetalleMetodoContratacion
-
-dw.DimMoneda - monedas
-  MonedaKey, ClaveMoneda, CodigoMoneda, NombreMoneda
-
-dw.BridgeContratoProveedor - relacion contrato-proveedor (muchos a muchos)
-  ContratoKey, ProveedorKey, RucProveedor, NombreProveedorOriginal, NombreProveedorEstandar
-
-dw.vwContratoProveedorBI - vista BI con datos de proveedor por contrato
-  ContratoKey, ProveedorKey, RucProveedor, NombreProveedorEstandar
-  CantidadProveedores, PesoProveedor, MontoContrato, MontoProrrateado
-
-NOTA FRAUDE: Si existe la tabla dw.FactFraude, tiene columnas:
-  ContratoKey, ScoreFraude (0.0-1.0), EsFraude (bit), MotivosRiesgo (nvarchar)
-  Unirla con FactContrato via ContratoKey para consultas de riesgo.
+dbo.SCORES_RIESGO - scores de anomalia/riesgo por proceso (uno a uno con HECHOS_PROCESO)
+  ocid                    (varchar) FK -> dbo.HECHOS_PROCESO.ocid (NO es bigint, es varchar)
+  b_postor_unico          (float)   sub-score: postor unico
+  b_directo               (float)   sub-score: contratacion directa
+  b_sancionado            (float)   sub-score: proveedor sancionado
+  b_reincidente           (float)   sub-score: ganador reincidente
+  b_concentracion         (float)   sub-score: concentracion economica
+  b_dependencia           (float)   sub-score: dependencia proveedor-entidad
+  b_brecha                (float)   sub-score: brecha monto adjudicado vs referencial
+  b_tiempo                (float)   sub-score: tiempo de decision
+  b_tasa_exito            (float)   sub-score: tasa de exito del ganador
+  b_fraccionamiento       (float)   sub-score: fraccionamiento de compras
+  t_proveedor, t_valor_ref, t_monto, t_metodo, t_categoria, t_tenderers,
+  t_periodo_ofertas, t_contrato_firmado, t_periodo_consultas  (bigint) - umbrales/flags de cada sub-score
+  score_integridad        (float)   score compuesto de integridad
+  score_transparencia     (float)   score compuesto de transparencia
+  score_anomalia          (float)   score compuesto de anomalia/riesgo (el mas usado para "riesgo mas alto")
 
 RELACIONES CLAVE:
-- FactContrato.EntidadKey -> DimEntidad.EntidadKey
-- FactContrato.FechaFirmaKey -> DimFecha.FechaKey
-- FactContrato.CategoriaKey -> DimCategoria.CategoriaKey
-- FactContrato.MetodoKey -> DimMetodoContratacion.MetodoKey
-- FactContrato.MonedaKey -> DimMoneda.MonedaKey
-- FactContrato.UbicacionEntidadKey -> DimUbicacion.UbicacionKey
-- BridgeContratoProveedor.ContratoKey -> FactContrato.ContratoKey
-- BridgeContratoProveedor.ProveedorKey -> DimProveedor.ProveedorKey
+- dbo.HECHOS_PROCESO.entidad_key -> dbo.DIM_ENTIDAD.entidad_key
+- dbo.HECHOS_PROCESO.proveedor_key -> dbo.DIM_PROVEEDOR.proveedor_key
+- dbo.HECHOS_PROCESO.proc_key -> dbo.DIM_PROCEDIMIENTO.proc_key
+- dbo.HECHOS_PROCESO.geo_key -> dbo.DIM_GEOGRAFIA.geo_key
+- dbo.HECHOS_PROCESO.fecha_convocatoria_key -> dbo.DIM_TIEMPO.fecha_key
+- dbo.HECHOS_PROCESO.fecha_adjudicacion_key -> dbo.DIM_TIEMPO.fecha_key
+- dbo.HECHOS_PROCESO.ocid -> dbo.SCORES_RIESGO.ocid (join por texto, no por key numerica)
+
+NOTA: no asumas ninguna otra tabla o columna fuera de esta lista (ej. no existe
+FactContrato, DimFecha, NombreEstandar, MontoContrato, etc. de versiones previas).
 """
 
 # ── Reglas para filtros de texto (evita 0 falsos por nombre incompleto) ──
@@ -102,15 +144,16 @@ REGLAS OBLIGATORIAS PARA FILTROS DE TEXTO (entidad, proveedor, buyer_name, prove
 
 2. USA SIEMPRE "LIKE" con comodines en ambos extremos, sobre las palabras
    clave mas distintivas de la pregunta, nunca la frase completa:
-   Correcto:   WHERE de.NombreEstandar LIKE '%PROMOCION%INVERSION%PRIVADA%'
-   Incorrecto: WHERE de.NombreEstandar = 'Agencia de Promocion de la Inversion Privada'
-   Incorrecto: WHERE de.NombreEstandar LIKE '%Agencia de Promocion de la Inversion Privada%'
+   Correcto:   WHERE de.buyer_name LIKE '%PROMOCION%INVERSION%PRIVADA%'
+   Incorrecto: WHERE de.buyer_name = 'Agencia de Promocion de la Inversion Privada'
+   Incorrecto: WHERE de.buyer_name LIKE '%Agencia de Promocion de la Inversion Privada%'
    (la frase completa como comodin es tan fragil como el "=" si falta o sobra
    una palabra; usa solo 2-4 palabras clave separadas por %)
+   Lo mismo aplica a dp.proveedor_nombre para filtros de proveedor.
 
 3. Todos los filtros de texto deben ser insensibles a mayusculas/minusculas
    y usar UPPER() en ambos lados de la comparacion:
-   WHERE UPPER(de.NombreEstandar) LIKE UPPER('%PROMOCION%INVERSION%PRIVADA%')
+   WHERE UPPER(de.buyer_name) LIKE UPPER('%PROMOCION%INVERSION%PRIVADA%')
 
 4. Si la pregunta del usuario nombra una entidad o proveedor, NO copies el
    texto del usuario tal cual dentro del LIKE. Extrae unicamente las 2-4
@@ -184,11 +227,12 @@ def pregunta_a_sql(pregunta: str, sql_con_error: str = None) -> str:
 REGLAS CRITICAS:
 1. Responde SOLO con SQL puro, sin markdown, sin explicaciones
 2. TOP va SIEMPRE despues de SELECT: "SELECT TOP 100 col FROM tabla ORDER BY col DESC"
-3. Alias fijos: fc=FactContrato, de=DimEntidad, dp=DimProveedor, dfe=DimFecha,
-   du=DimUbicacion, dca=DimCategoria, dm=DimMetodoContratacion, dmo=DimMoneda, bcp=BridgeContratoProveedor
-4. Schema dw. siempre antes del nombre de tabla
+3. Alias fijos: hp=dbo.HECHOS_PROCESO, de=dbo.DIM_ENTIDAD, dp=dbo.DIM_PROVEEDOR, dt=dbo.DIM_TIEMPO
+4. Schema dbo. siempre antes del nombre de tabla
 5. LIMIT no existe en SQL Server, usa TOP
-6. Si no puedes responder: SELECT 'No tengo datos para esa consulta' AS mensaje
+6. Si no puedes responder, o si necesitas una columna que no aparece en el
+   SCHEMA_CONTEXT: SELECT 'No tengo datos para esa consulta' AS mensaje
+   — NUNCA inventes un nombre de tabla o columna que no este en el schema
 
 {REGLAS_FILTROS_TEXTO}"""
 
