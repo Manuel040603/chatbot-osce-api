@@ -7,14 +7,20 @@
   /* ── Reset & base ── */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+  html, body {
+    height: 100%;
+    width: 100%;
+  }
+
   body {
     font-family: 'Segoe UI', system-ui, sans-serif;
     background: #0f1923;
     color: #e8edf2;
-    height: 100vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    position: fixed;
+    inset: 0;
   }
 
   /* ── Header ── */
