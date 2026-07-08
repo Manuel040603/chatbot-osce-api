@@ -31,8 +31,8 @@ Todas las tablas estan en el schema dbo (NO usar schema dw, ese ya no existe).
 
 TABLAS PRINCIPALES:
 
-dbo.HECHOS_PROCESO - tabla de hechos principal (un registro = un proceso de contratacion)
-    ocid (varchar, PK) - identificador OCDS del proceso, formato tipo 'ocds-dgv273-seacev3-2022-47-5'
+dbo.HECHOS_PROCESO (~350k filas) - tabla de hechos principal (un registro = un proceso de contratacion)
+    ocid (varchar(100), PK) - identificador OCDS del proceso, formato 'ocds-dgv273-seacev3-2022-47-5'
     entidad_key, proveedor_key, proc_key, geo_key (bigint) - llaves foraneas a dimensiones
     fecha_convocatoria_key, fecha_adjudicacion_key (bigint) - llaves foraneas a DIM_TIEMPO
     n_oferentes (bigint)
@@ -45,36 +45,42 @@ dbo.HECHOS_PROCESO - tabla de hechos principal (un registro = un proceso de cont
     n_postulaciones_par, n_adj_par_anio (bigint)
     ganador_recurrente_entidad, ganador_recurrente_global (bigint)
 
-dbo.SCORES_RIESGO - scores de riesgo/anomalia por proceso (creada por el equipo)
-    ocid (varchar) - MISMO FORMATO que HECHOS_PROCESO.ocid, se une DIRECTO sin transformar
+dbo.SCORES_RIESGO (~265k filas) - scores de riesgo/anomalia por proceso (creada por el equipo)
+    ocid (varchar(100)) - MISMO FORMATO que HECHOS_PROCESO.ocid, se une DIRECTO sin transformar
     b_postor_unico, b_directo, b_sancionado, b_reincidente, b_concentracion,
-    b_dependencia, b_brecha, b_tiempo, b_tasa_exito, b_fraccionamiento (float) - banderas/subscores individuales
+    b_dependencia, b_brecha, b_tiempo, b_tasa_exito, b_fraccionamiento (float) - banderas/subscores 0-1
     t_proveedor, t_valor_ref, t_monto, t_metodo, t_categoria, t_tenderers,
     t_periodo_ofertas, t_contrato_firmado, t_periodo_consultas (bigint) - variables de contexto/umbral
-    score_integridad, score_transparencia, score_anomalia (float) - scores finales (mientras mas alto, mas riesgo/anomalia)
+    score_integridad, score_transparencia, score_anomalia (float) - scores finales (mas alto = mas riesgo)
 
 IMPORTANTE SOBRE EL JOIN HECHOS_PROCESO <-> SCORES_RIESGO:
     Se unen DIRECTAMENTE por ocid: HECHOS_PROCESO.ocid = SCORES_RIESGO.ocid
     NO hay que separar ni recortar el ocid con LEFT/CHARINDEX, ambas columnas ya tienen el mismo formato.
-    No todos los procesos tienen score (es un LEFT JOIN si se quiere incluir procesos sin score calculado).
+    No todos los procesos tienen score (usar LEFT JOIN si se quiere incluir procesos sin score calculado).
 
 dbo.DIM_ENTIDAD - entidades contratantes (compradoras)
     entidad_key (bigint, PK)
-    buyer_id, buyer_name (varchar)
+    buyer_id (varchar, ej 'PE-CONSUCODE-47')
+    buyer_name (varchar, ej 'GOBIERNO REGIONAL DE PASCO')
 
 dbo.DIM_PROVEEDOR - proveedores/postores
     proveedor_key (bigint, PK)
-    proveedor_id, proveedor_nombre (varchar)
+    proveedor_id (varchar, RUC del proveedor)
+    proveedor_nombre (varchar, razon social)
     es_consorcio (bit)
     prov_origen, prov_departamento, prov_provincia, prov_distrito (varchar) - ubicacion del proveedor
 
 dbo.DIM_GEOGRAFIA - ubicacion geografica del proceso/entidad
     geo_key (bigint, PK)
     prov_departamento, prov_provincia, prov_distrito (varchar)
+    NOTA: puede tener NULL cuando la geografia del proceso no esta definida.
+    Usar LEFT JOIN al unir HECHOS_PROCESO con DIM_GEOGRAFIA para no perder filas.
 
 dbo.DIM_PROCEDIMIENTO - tipo/metodo de contratacion
     proc_key (bigint, PK)
-    metodo, metodo_detalle, categoria (varchar)
+    metodo (varchar, ej 'open')
+    metodo_detalle (varchar, ej 'Licitacion Publica', 'Concurso Publico', 'Regimen Especial')
+    categoria (varchar, ej 'works', 'services')
 
 dbo.DIM_TIEMPO - dimension de tiempo
     fecha_key (bigint, PK)
@@ -85,10 +91,38 @@ RELACIONES CLAVE:
     HECHOS_PROCESO.entidad_key -> DIM_ENTIDAD.entidad_key
     HECHOS_PROCESO.proveedor_key -> DIM_PROVEEDOR.proveedor_key
     HECHOS_PROCESO.proc_key -> DIM_PROCEDIMIENTO.proc_key
-    HECHOS_PROCESO.geo_key -> DIM_GEOGRAFIA.geo_key
-    HECHOS_PROCESO.fecha_convocatoria_key -> DIM_TIEMPO.fecha_key
-    HECHOS_PROCESO.fecha_adjudicacion_key -> DIM_TIEMPO.fecha_key
+    HECHOS_PROCESO.geo_key -> DIM_GEOGRAFIA.geo_key (usar LEFT JOIN, puede tener NULL)
+    HECHOS_PROCESO.fecha_convocatoria_key -> DIM_TIEMPO.fecha_key (para filtros por convocatoria)
+    HECHOS_PROCESO.fecha_adjudicacion_key -> DIM_TIEMPO.fecha_key (para filtros por adjudicacion)
     HECHOS_PROCESO.ocid -> SCORES_RIESGO.ocid (join directo, mismo formato)
+
+EJEMPLO DE CONSULTA ENRIQUECIDA (score de riesgo + entidad + proveedor):
+Para preguntas tipo "que score de riesgo tuvo tal proveedor/entidad", siempre incluir
+nombre de entidad y proveedor, no solo el score:
+
+SELECT TOP 100
+    hp.ocid,
+    de.buyer_name AS entidad,
+    dp.proveedor_nombre AS proveedor,
+    dpr.metodo_detalle AS tipo_procedimiento,
+    hp.monto_adjudicado,
+    sr.score_anomalia,
+    sr.score_integridad,
+    sr.score_transparencia,
+    dt.anio,
+    dt.nombre_mes
+FROM dbo.HECHOS_PROCESO hp
+JOIN dbo.SCORES_RIESGO sr ON hp.ocid = sr.ocid
+JOIN dbo.DIM_ENTIDAD de ON hp.entidad_key = de.entidad_key
+JOIN dbo.DIM_PROVEEDOR dp ON hp.proveedor_key = dp.proveedor_key
+JOIN dbo.DIM_PROCEDIMIENTO dpr ON hp.proc_key = dpr.proc_key
+JOIN dbo.DIM_TIEMPO dt ON hp.fecha_adjudicacion_key = dt.fecha_key
+WHERE dp.proveedor_nombre LIKE '%NOMBRE_PROVEEDOR%'
+ORDER BY sr.score_anomalia DESC
+
+Siempre que la pregunta mencione un proveedor o entidad por nombre, incluir esas dimensiones
+en el JOIN para dar contexto (nombre, no solo IDs/keys). Nunca mostrar solo el score sin
+al menos entidad y proveedor cuando la pregunta es sobre riesgo/anomalia.
 
 NOTA MONEDA: No existe columna de moneda en HECHOS_PROCESO. Los montos (monto_adjudicado,
 valor_referencial) se asumen en Soles (S/) salvo que el usuario indique lo contrario.
