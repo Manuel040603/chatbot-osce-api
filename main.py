@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import pymssql
 import pandas as pd
 import re
+import time
 import threading
 from groq import Groq
 import os
@@ -120,12 +121,32 @@ def get_connection():
     )
 
 
-def run_query(sql: str) -> pd.DataFrame:
-    conn = get_connection()
-    try:
-        return pd.read_sql(sql, conn)
-    finally:
-        conn.close()
+def run_query(sql: str, max_intentos: int = 3) -> pd.DataFrame:
+    """
+    Reintenta en caso de timeout/conexión muerta. Esto cubre dos casos reales:
+    1. Azure SQL Serverless con auto-pause: el primer intento "despierta" la BD
+       y puede tardar >30-60s y fallar; el segundo intento ya la encuentra
+       despierta y responde rápido.
+    2. Cortes de red intermitentes entre Railway y Azure.
+    Si tras max_intentos sigue fallando, es un problema real de servidor/red,
+    no algo que un retry pueda arreglar (ver diagnóstico en el chat).
+    """
+    ultimo_error = None
+    for intento in range(max_intentos):
+        conn = None
+        try:
+            conn = get_connection()
+            return pd.read_sql(sql, conn)
+        except Exception as e:
+            ultimo_error = e
+            time.sleep(2 * (intento + 1))  # backoff: 2s, 4s, 6s
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    raise ultimo_error
 
 
 # ── Limpieza SQL ───────────────────────────────────────────────
@@ -171,7 +192,17 @@ REGLAS CRITICAS:
    por score_anomalia DESC pensando que eso es "riesgo" - son conceptos distintos.
 8. Si la consulta cruza HECHOS_PROCESO con SCORES_RIESGO, siempre filtra o pon un TOP
    razonable antes del ORDER BY cuando no haya WHERE, para evitar ordenar el dataset
-   completo en cada consulta."""
+   completo en cada consulta.
+9. NUNCA devuelvas el ocid como unico identificador de un proceso. El ocid es una clave
+   tecnica, no le sirve al usuario para entender nada. Siempre que selecciones desde
+   HECHOS_PROCESO y/o SCORES_RIESGO, haz JOIN y trae tambien:
+   - de.buyer_name AS entidad (desde DIM_ENTIDAD)
+   - dp.proveedor_nombre AS proveedor (desde DIM_PROVEEDOR)
+   - dpr.metodo_detalle AS tipo_procedimiento (desde DIM_PROCEDIMIENTO) si aplica
+   - hp.monto_adjudicado AS monto (si aplica a la pregunta)
+   - dt.anio, dt.nombre_mes (si aplica a la pregunta, usando fecha_adjudicacion_key)
+   Puedes seguir incluyendo el ocid como columna adicional de referencia, pero jamas
+   como la unica columna identificadora del resultado."""
 
     messages = [{"role": "system", "content": system_prompt}]
     if sql_con_error:
@@ -208,6 +239,9 @@ Redacta respuestas en forma de analisis narrativo ejecutivo, fluido y profesiona
 ESTILO:
 - Escribe en prosa continua, sin etiquetas como "Analisis:", "Contexto:", "Hallazgos:"
 - Responde directamente con datos concretos: nombres, montos exactos, fechas, porcentajes
+- Prioriza SIEMPRE nombres legibles (entidad, proveedor) sobre codigos tecnicos como el
+  ocid. Si los datos traen ambos, menciona el nombre de la entidad/proveedor y omite el
+  ocid salvo que el usuario lo haya pedido explicitamente
 - Si hay multiples elementos destacados, usa viñetas breves SIN encabezados previos
 - Cuando detectes algo inusual (concentracion, montos atipicos, contratacion directa), menciónalo
 - Usa S/ para soles y US$ para dolares
@@ -279,6 +313,12 @@ def schema_check():
         raise HTTPException(500, f"No pude leer el schema: {e}")
 
 
+def es_error_de_conexion(error_msg: str) -> bool:
+    marcadores = ["20003", "20047", "connection timed out", "dbprocess is dead", "timeout"]
+    error_lower = error_msg.lower()
+    return any(m in error_lower for m in marcadores)
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     pregunta = req.pregunta.strip()
@@ -291,14 +331,25 @@ def chat(req: ChatRequest):
 
     for intento in range(3):
         try:
-            sql_raw = pregunta_a_sql(pregunta, sql if intento > 0 else None)
-            sql = limpiar_sql(sql_raw)
-            df = run_query(sql)
+            if sql is None or not es_error_de_conexion(str(ultimo_error or "")):
+                # primer intento, o el intento anterior falló por SQL malo -> regenerar
+                sql_raw = pregunta_a_sql(pregunta, sql if intento > 0 else None)
+                sql = limpiar_sql(sql_raw)
+            # si el intento anterior fue error de conexión, reusamos el mismo sql
+            # (ya era correcto, solo falló la conexión) y no gastamos otra llamada a Groq
+            df = run_query(sql, max_intentos=2)
             break
         except Exception as e:
             ultimo_error = str(e)
 
     if df is None:
+        if es_error_de_conexion(str(ultimo_error)):
+            raise HTTPException(
+                503,
+                "La base de datos no respondió a tiempo (posible cold-start de Azure SQL "
+                "o corte de red). El SQL generado era correcto, intenta de nuevo en unos "
+                f"segundos. Detalle: {ultimo_error}",
+            )
         raise HTTPException(500, f"No pude ejecutar la consulta: {ultimo_error}")
 
     respuesta = interpretar_resultado(pregunta, df)
