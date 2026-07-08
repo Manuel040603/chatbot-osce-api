@@ -25,116 +25,68 @@ DB_USER      = os.getenv("DB_USER")
 DB_PASS      = os.getenv("DB_PASS")
 
 SCHEMA_CONTEXT = """
-Base de datos SQL Server: OECE_DW_1
-Contiene datos de contrataciones publicas del Peru (OSCE/SEACE) 2022-2025.
+Base de datos SQL Server: OECE_DW
+Datamart de analisis de riesgo de corrupcion/fraude en contrataciones publicas del Peru (OSCE/SEACE).
+Contiene procesos de contratacion con indicadores de riesgo pre-calculados (postor unico, sancionados, concentracion economica, scores de integridad/transparencia/anomalia).
 
-TABLAS PRINCIPALES (schema: dw):
+TABLAS (schema: dbo):
 
-dw.FactContrato - tabla de hechos principal
-  ContratoKey, ClaveContrato, Ocid, IdContrato, IdAdjudicacion, IdLicitacion
-  EntidadKey, UbicacionEntidadKey, MonedaKey, CategoriaKey, MetodoKey
-  FechaFirmaKey, FechaInicioKey, FechaFinKey
-  TituloContrato, DescripcionContrato
-  FechaFirma, FechaInicio, FechaFin, DuracionDias
-  MontoContrato (decimal), MontoFinal (decimal), MontoLicitacion (decimal)
-  MonedaContrato, NombreMonedaContrato
-  NombreEntidadOriginal, NombreEntidadEstandar, RucEntidad
-  MetodoContratacion, DetalleMetodoContratacion
-  CategoriaPrincipal
-  AnioArchivo, MesArchivo
+dbo.HECHOS_PROCESO - tabla de hechos principal, un registro por proceso de contratacion
+  ocid (varchar) - identificador unico del proceso, clave para unir con SCORES_RIESGO
+  entidad_key, proveedor_key, proc_key, geo_key (bigint) - llaves a las dimensiones
+  fecha_convocatoria_key, fecha_adjudicacion_key (bigint) - llaves a DIM_TIEMPO
+  n_oferentes (bigint) - cantidad de postores que participaron
+  monto_adjudicado, valor_referencial (float) - montos en soles
+  brecha_adj_ref (float) - diferencia entre monto adjudicado y valor referencial
+  n_awards, n_proveedores_distintos, n_miembros_consorcio (bigint)
+  tiempo_decision (bigint) - dias entre convocatoria y adjudicacion
+  es_postor_unico, es_postor_unico_competitivo (bit) - solo se presento un postor
+  es_directo (bit) - contratacion directa (sin concurso abierto)
+  ganador_sancionado_historial, ganador_reincidente, sancionado_post_adjudicacion (bit)
+  concentracion_economica_ent_prov (float) - que tan concentrados estan los contratos de esa entidad en ese proveedor
+  dependencia_prov_ent (float) - dependencia del proveedor respecto a esa entidad
+  tasa_exito_ganador (float) - tasa historica de exito del proveedor ganador
+  n_postulaciones_par, n_adj_par_anio, ganador_recurrente_entidad, ganador_recurrente_global (bigint)
 
-dw.DimEntidad - entidades contratantes
-  EntidadKey, ClaveOrganizacion, Ruc, NombreOriginal, NombreEstandar
-  TipoOrganizacion, Departamento, Region, Localidad, Pais
-  EsEntidad (bit), EsProveedor (bit)
+dbo.SCORES_RIESGO - scores de riesgo calculados por proceso (1 a 1 con HECHOS_PROCESO via ocid)
+  ocid (varchar) - unir con HECHOS_PROCESO.ocid
+  b_postor_unico, b_directo, b_sancionado, b_reincidente, b_concentracion,
+  b_dependencia, b_brecha, b_tiempo, b_tasa_exito, b_fraccionamiento (float) - banderas/subscores individuales de riesgo (0-1)
+  t_proveedor, t_valor_ref, t_monto, t_metodo, t_categoria, t_tenderers,
+  t_periodo_ofertas, t_contrato_firmado, t_periodo_consultas (bigint) - flags de alertas puntuales
+  score_integridad (float) - score general de integridad del proceso
+  score_transparencia (float) - score de transparencia
+  score_anomalia (float) - score de anomalia/riesgo de fraude (mientras mas alto, mas riesgo)
 
-dw.DimProveedor - proveedores
-  ProveedorKey, ClaveOrganizacion, Ruc, NombreOriginal, NombreEstandar
-  TipoOrganizacion, Departamento, Region, Localidad
+dbo.DIM_ENTIDAD - entidades contratantes (compradores)
+  entidad_key (bigint), buyer_id (varchar), buyer_name (varchar)
 
-dw.DimFecha - dimension tiempo
-  FechaKey, Fecha, Anio, Semestre, Trimestre, MesNumero, MesNombre
-  AnioMes, Dia, EsFinSemana
+dbo.DIM_PROVEEDOR - proveedores
+  proveedor_key (bigint), proveedor_id (varchar), proveedor_nombre (varchar)
+  es_consorcio (bit), prov_origen (varchar)
+  prov_departamento, prov_provincia, prov_distrito (varchar) - ubicacion del proveedor
 
-dw.DimUbicacion - geografia
-  UbicacionKey, ClaveUbicacion, Pais, Departamento, Region, Localidad
+dbo.DIM_GEOGRAFIA - geografia de la entidad/proceso
+  geo_key (bigint), prov_departamento, prov_provincia, prov_distrito (varchar)
 
-dw.DimCategoria - categorias de contratacion
-  CategoriaKey, ClaveCategoria, CategoriaPrincipal
+dbo.DIM_PROCEDIMIENTO - metodo y categoria de contratacion
+  proc_key (bigint), metodo (varchar), metodo_detalle (varchar), categoria (varchar)
 
-dw.DimMetodoContratacion - metodos de contratacion
-  MetodoKey, ClaveMetodo, MetodoContratacion, DetalleMetodoContratacion
+dbo.DIM_TIEMPO - dimension de tiempo
+  fecha_key (bigint), fecha (datetime), anio (int), mes (int), trimestre (int), nombre_mes (varchar)
 
-dw.DimMoneda - monedas
-  MonedaKey, ClaveMoneda, CodigoMoneda, NombreMoneda
+RELACIONES CLAVE (no hay foreign keys formales en la BD, unir por estas columnas):
+- HECHOS_PROCESO.entidad_key -> DIM_ENTIDAD.entidad_key
+- HECHOS_PROCESO.proveedor_key -> DIM_PROVEEDOR.proveedor_key
+- HECHOS_PROCESO.proc_key -> DIM_PROCEDIMIENTO.proc_key
+- HECHOS_PROCESO.geo_key -> DIM_GEOGRAFIA.geo_key
+- HECHOS_PROCESO.fecha_convocatoria_key -> DIM_TIEMPO.fecha_key
+- HECHOS_PROCESO.fecha_adjudicacion_key -> DIM_TIEMPO.fecha_key
+- HECHOS_PROCESO.ocid -> SCORES_RIESGO.ocid
 
-dw.BridgeContratoProveedor - relacion contrato-proveedor
-  ContratoKey, ProveedorKey, RucProveedor, NombreProveedorOriginal, NombreProveedorEstandar
-
-dw.vwContratoProveedorBI - vista BI con datos de proveedor por contrato
-  ContratoKey, ProveedorKey, RucProveedor, NombreProveedorEstandar
-  CantidadProveedores, PesoProveedor, MontoContrato, MontoProrrateado
-
-dw.ValorMoneda - tipo de cambio a Soles (PEN) por moneda
-  MonedaKey, NombreMoneda, TipodeCambio
-
-NOTA FRAUDE: Si existe la tabla dw.FactFraude, tiene columnas:
-  ContratoKey, ScoreFraude (0.0-1.0), EsFraude (bit), MotivosRiesgo (nvarchar)
-  Unirla con FactContrato via ContratoKey para consultas de riesgo.
-
-RELACIONES CLAVE:
-- FactContrato.EntidadKey -> DimEntidad.EntidadKey
-- FactContrato.FechaFirmaKey -> DimFecha.FechaKey
-- FactContrato.CategoriaKey -> DimCategoria.CategoriaKey
-- FactContrato.MetodoKey -> DimMetodoContratacion.MetodoKey
-- FactContrato.MonedaKey -> DimMoneda.MonedaKey
-- FactContrato.MonedaKey -> ValorMoneda.MonedaKey (para tipo de cambio)
-- FactContrato.UbicacionEntidadKey -> DimUbicacion.UbicacionKey
-- BridgeContratoProveedor.ContratoKey -> FactContrato.ContratoKey
-- BridgeContratoProveedor.ProveedorKey -> DimProveedor.ProveedorKey
-  (FactContrato NO tiene ProveedorKey directo; el vinculo a proveedor
-  SIEMPRE pasa por BridgeContratoProveedor)
-
-═══════════════════════════════════════════════════════════════
-REGLAS DE NEGOCIO OBLIGATORIAS (replican EXACTO el reporte Power BI
-oficial del proyecto - aplican SIEMPRE, el usuario no necesita pedirlas):
-═══════════════════════════════════════════════════════════════
-
-1. MONTO EN SOLES (conversion de moneda obligatoria):
-   El "monto final" que se reporta SIEMPRE es MontoContrato convertido a
-   soles, NUNCA la columna MontoFinal (esa columna no se usa en el reporte
-   oficial). Formula exacta:
-       fc.MontoContrato * vm.TipodeCambio
-   Requiere JOIN: INNER JOIN dw.ValorMoneda vm ON fc.MonedaKey = vm.MonedaKey
-   Si una pregunta pide "monto", "monto total", "monto final" -> usa SIEMPRE
-   esta formula convertida, nunca sumes MontoContrato o MontoFinal sin convertir.
-
-2. SOLO CONTRATOS VALIDOS:
-   Un contrato es "valido" solo si su fecha de fin ya paso respecto a hoy.
-   Agrega SIEMPRE en el WHERE:
-       AND fc.FechaFin < CAST(GETDATE() AS DATE)
-   (Este resultado cambia dia a dia porque depende de la fecha actual,
-   es el comportamiento correcto y esperado, igual que en Power BI.)
-
-3. SOLO CONTRATOS CON PROVEEDOR VINCULADO ("Aplica"):
-   Un contrato solo cuenta si tiene un proveedor vinculado en
-   BridgeContratoProveedor. Agrega SIEMPRE:
-       INNER JOIN dw.BridgeContratoProveedor bcp ON fc.ContratoKey = bcp.ContratoKey
-       INNER JOIN dw.DimProveedor dp ON bcp.ProveedorKey = dp.ProveedorKey
-   (el INNER JOIN ya excluye automaticamente los contratos sin proveedor)
-
-EJEMPLO DE QUERY CORRECTO COMPLETO:
-SELECT
-    SUM(fc.MontoContrato * vm.TipodeCambio) AS MontoTotal,
-    COUNT(fc.ContratoKey) AS CantidadContratos
-FROM dw.FactContrato fc
-INNER JOIN dw.DimFecha dfe ON fc.FechaFirmaKey = dfe.FechaKey
-INNER JOIN dw.ValorMoneda vm ON fc.MonedaKey = vm.MonedaKey
-INNER JOIN dw.BridgeContratoProveedor bcp ON fc.ContratoKey = bcp.ContratoKey
-INNER JOIN dw.DimProveedor dp ON bcp.ProveedorKey = dp.ProveedorKey
-WHERE fc.NombreEntidadOriginal = 'NOMBRE EXACTO DE LA ENTIDAD'
-    AND dfe.Anio = 2022
-    AND fc.FechaFin < CAST(GETDATE() AS DATE)
+NOTA IMPORTANTE: si la pregunta es sobre riesgo, fraude, corrupcion, anomalias, postor unico,
+contratacion directa, proveedores sancionados o concentracion economica, usa SCORES_RIESGO
+(especialmente score_anomalia, score_integridad, score_transparencia) unida a HECHOS_PROCESO via ocid.
 """
 
 # ── Conexion a Azure SQL (via pymssql / FreeTDS) ────────────────
@@ -191,18 +143,12 @@ def pregunta_a_sql(pregunta: str, sql_con_error: str = None) -> str:
 REGLAS CRITICAS:
 1. Responde SOLO con SQL puro, sin markdown, sin explicaciones
 2. TOP va SIEMPRE despues de SELECT: "SELECT TOP 100 col FROM tabla ORDER BY col DESC"
-3. Alias fijos: fc=FactContrato, de=DimEntidad, dp=DimProveedor, dfe=DimFecha,
-   du=DimUbicacion, dca=DimCategoria, dm=DimMetodoContratacion, dmo=DimMoneda,
-   bcp=BridgeContratoProveedor, vm=ValorMoneda
-4. Schema dw. siempre antes del nombre de tabla
+3. Alias fijos: hp=HECHOS_PROCESO, sr=SCORES_RIESGO, de=DIM_ENTIDAD, dp=DIM_PROVEEDOR,
+   dpr=DIM_PROCEDIMIENTO, dg=DIM_GEOGRAFIA, dt=DIM_TIEMPO
+4. Schema dbo. siempre antes del nombre de tabla
 5. LIMIT no existe en SQL Server, usa TOP
-6. Si no puedes responder: SELECT 'No tengo datos para esa consulta' AS mensaje
-7. OBLIGATORIO en TODA consulta que involucre montos, conteo de contratos,
-   o cualquier metrica agregada de FactContrato: aplica las 3 reglas de negocio
-   de la seccion "REGLAS DE NEGOCIO OBLIGATORIAS" de arriba (conversion a soles
-   via ValorMoneda, filtro de contrato valido por fecha, join a proveedor).
-   Esto aplica incluso si el usuario no las menciona explicitamente en su pregunta.
-   NUNCA sumes MontoContrato o MontoFinal sin multiplicar por TipodeCambio."""
+6. Para preguntas de riesgo/fraude/anomalia, une hp con sr via ocid
+7. Si no puedes responder: SELECT 'No tengo datos para esa consulta' AS mensaje"""
 
     messages = [{"role": "system", "content": system_prompt}]
     if sql_con_error:
@@ -231,7 +177,7 @@ def interpretar_resultado(pregunta: str, df: pd.DataFrame) -> str:
         messages=[
             {
                 "role": "system",
-                "content": """Eres un analista senior de inteligencia de negocios especializado en contrataciones publicas del Peru (OSCE/SEACE 2022-2025).
+                "content": """Eres un analista senior de inteligencia de negocios especializado en riesgo de corrupcion en contrataciones publicas del Peru (OSCE/SEACE).
 
 Redacta respuestas en forma de analisis narrativo ejecutivo, fluido y profesional en espanol.
 
@@ -240,6 +186,7 @@ ESTILO:
 - Responde directamente con datos concretos: nombres, montos exactos, fechas, porcentajes
 - Si hay multiples elementos destacados, usa viñetas breves SIN encabezados previos
 - Cuando detectes algo inusual (concentracion, montos atipicos, contratacion directa), menciónalo
+- Si los datos incluyen score_anomalia, score_integridad o score_transparencia, explica que significan en terminos de riesgo (score de anomalia alto = mayor riesgo de irregularidad, no necesariamente fraude comprobado)
 - Usa S/ para soles y US$ para dolares
 - Al final, en cursiva, sugiere una pregunta de profundizacion relevante
 - Maximo 200 palabras
