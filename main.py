@@ -115,8 +115,8 @@ def get_connection():
         password=DB_PASS,
         database=DB_NAME,
         as_dict=False,
-        login_timeout=30,
-        timeout=30,
+        login_timeout=60,
+        timeout=60,
     )
     return _conn
 
