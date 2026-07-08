@@ -4,8 +4,6 @@ from pydantic import BaseModel
 import pymssql
 import pandas as pd
 import re
-import time
-import threading
 from groq import Groq
 import os
 
@@ -26,132 +24,134 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 
-# Schema verificado el 08/07/2026 contra OECE_DW via INFORMATION_SCHEMA.COLUMNS.
-# Esta es la fuente de verdad real (reemplaza la version anterior con dw.FactContrato
-# que correspondia a OECE_DW_1 y ya no aplica).
 SCHEMA_CONTEXT = """
-Base de datos SQL Server: OECE_DW
-Contiene datos de contrataciones publicas del Peru (OSCE/SEACE) con analisis de riesgo/integridad.
-Todas las tablas usan el schema "dbo".
+Base de datos SQL Server: OECE_DW_1
+Contiene datos de contrataciones publicas del Peru (OSCE/SEACE) 2022-2025.
 
-dbo.HECHOS_PROCESO - tabla de hechos principal (grano: un proceso de contratacion = ocid)
-    ocid (varchar, PK/clave del proceso)
-    entidad_key (bigint, FK -> DIM_ENTIDAD.entidad_key)
-    proveedor_key (bigint, FK -> DIM_PROVEEDOR.proveedor_key)
-    proc_key (bigint, FK -> DIM_PROCEDIMIENTO.proc_key)
-    geo_key (bigint)
-    fecha_convocatoria_key (bigint, FK -> DIM_TIEMPO.fecha_key)
-    fecha_adjudicacion_key (bigint, FK -> DIM_TIEMPO.fecha_key)
-    n_oferentes (bigint) - numero de postores en el proceso
-    monto_adjudicado (float), valor_referencial (float), brecha_adj_ref (float)
-    n_awards (bigint), n_proveedores_distintos (bigint), n_miembros_consorcio (bigint)
-    tiempo_decision (bigint) - dias entre convocatoria y adjudicacion
-    es_postor_unico (bit), es_postor_unico_competitivo (bit), es_directo (bit)
-    ganador_sancionado_historial (bit), ganador_reincidente (bit), sancionado_post_adjudicacion (bit)
-    concentracion_economica_ent_prov (float), dependencia_prov_ent (float)
-    tasa_exito_ganador (float)
-    n_postulaciones_par (bigint), n_adj_par_anio (bigint)
-    ganador_recurrente_entidad (bigint), ganador_recurrente_global (bigint)
+TABLAS PRINCIPALES (schema: dw):
 
-dbo.SCORES_RIESGO - scores de riesgo/integridad por proceso (1 fila por ocid)
-    ocid (varchar, FK -> HECHOS_PROCESO.ocid)
-    b_postor_unico, b_directo, b_sancionado, b_reincidente, b_concentracion,
-    b_dependencia, b_brecha, b_tiempo, b_tasa_exito, b_fraccionamiento (float)
-        -> banderas/subindicadores normalizados de cada factor de riesgo individual
-    t_proveedor, t_valor_ref, t_monto, t_metodo, t_categoria, t_tenderers,
-    t_periodo_ofertas, t_contrato_firmado, t_periodo_consultas (bigint)
-        -> variables de tiempo/conteo usadas para calcular los scores agregados
-    score_integridad (float) - score compuesto de integridad del proceso
-    score_transparencia (float) - score compuesto de transparencia del proceso
-    score_anomalia (float) - score compuesto de anomalia estadistica del proceso
+dw.FactContrato - tabla de hechos principal
+  ContratoKey, ClaveContrato, Ocid, IdContrato, IdAdjudicacion, IdLicitacion
+  EntidadKey, UbicacionEntidadKey, MonedaKey, CategoriaKey, MetodoKey
+  FechaFirmaKey, FechaInicioKey, FechaFinKey
+  TituloContrato, DescripcionContrato
+  FechaFirma, FechaInicio, FechaFin, DuracionDias
+  MontoContrato (decimal), MontoFinal (decimal), MontoLicitacion (decimal)
+  MonedaContrato, NombreMonedaContrato
+  NombreEntidadOriginal, NombreEntidadEstandar, RucEntidad
+  MetodoContratacion, DetalleMetodoContratacion
+  CategoriaPrincipal
+  AnioArchivo, MesArchivo
 
-dbo.DIM_ENTIDAD
-    entidad_key (bigint, PK), buyer_id (varchar), buyer_name (varchar)
+dw.DimEntidad - entidades contratantes
+  EntidadKey, ClaveOrganizacion, Ruc, NombreOriginal, NombreEstandar
+  TipoOrganizacion, Departamento, Region, Localidad, Pais
+  EsEntidad (bit), EsProveedor (bit)
 
-dbo.DIM_PROVEEDOR
-    proveedor_key (bigint, PK), proveedor_id (varchar), proveedor_nombre (varchar)
-    es_consorcio (bit), prov_origen (varchar)
-    prov_departamento (varchar), prov_provincia (varchar), prov_distrito (varchar)
-    NOTA: proveedor_key = 1 es un registro "desconocido" (proveedor_id = '(sin proveedor)',
-    proveedor_nombre = 'Proveedor no identificado'). Agrupa procesos donde no se pudo
-    identificar el proveedor en la fuente OCDS. No es un error de datos, es un valor
-    valido y esperado.
+dw.DimProveedor - proveedores
+  ProveedorKey, ClaveOrganizacion, Ruc, NombreOriginal, NombreEstandar
+  TipoOrganizacion, Departamento, Region, Localidad
 
-dbo.DIM_PROCEDIMIENTO
-    proc_key (bigint, PK), metodo (varchar), metodo_detalle (varchar), categoria (varchar)
+dw.DimFecha - dimension tiempo
+  FechaKey, Fecha, Anio, Semestre, Trimestre, MesNumero, MesNombre
+  AnioMes, Dia, EsFinSemana
 
-dbo.DIM_TIEMPO
-    fecha_key (bigint, PK), fecha (datetime), anio (int), mes (int)
-    trimestre (int), nombre_mes (varchar)
+dw.DimUbicacion - geografia
+  UbicacionKey, ClaveUbicacion, Pais, Departamento, Region, Localidad
+
+dw.DimCategoria - categorias de contratacion
+  CategoriaKey, ClaveCategoria, CategoriaPrincipal
+
+dw.DimMetodoContratacion - metodos de contratacion
+  MetodoKey, ClaveMetodo, MetodoContratacion, DetalleMetodoContratacion
+
+dw.DimMoneda - monedas
+  MonedaKey, ClaveMoneda, CodigoMoneda, NombreMoneda
+
+dw.BridgeContratoProveedor - relacion contrato-proveedor (muchos a muchos)
+  ContratoKey, ProveedorKey, RucProveedor, NombreProveedorOriginal, NombreProveedorEstandar
+
+dw.vwContratoProveedorBI - vista BI con datos de proveedor por contrato
+  ContratoKey, ProveedorKey, RucProveedor, NombreProveedorEstandar
+  CantidadProveedores, PesoProveedor, MontoContrato, MontoProrrateado
+
+NOTA FRAUDE: Si existe la tabla dw.FactFraude, tiene columnas:
+  ContratoKey, ScoreFraude (0.0-1.0), EsFraude (bit), MotivosRiesgo (nvarchar)
+  Unirla con FactContrato via ContratoKey para consultas de riesgo.
 
 RELACIONES CLAVE:
-- HECHOS_PROCESO.ocid = SCORES_RIESGO.ocid
-- HECHOS_PROCESO.entidad_key = DIM_ENTIDAD.entidad_key
-- HECHOS_PROCESO.proveedor_key = DIM_PROVEEDOR.proveedor_key
-- HECHOS_PROCESO.proc_key = DIM_PROCEDIMIENTO.proc_key
-- HECHOS_PROCESO.fecha_convocatoria_key / fecha_adjudicacion_key = DIM_TIEMPO.fecha_key
+- FactContrato.EntidadKey -> DimEntidad.EntidadKey
+- FactContrato.FechaFirmaKey -> DimFecha.FechaKey
+- FactContrato.CategoriaKey -> DimCategoria.CategoriaKey
+- FactContrato.MetodoKey -> DimMetodoContratacion.MetodoKey
+- FactContrato.MonedaKey -> DimMoneda.MonedaKey
+- FactContrato.UbicacionEntidadKey -> DimUbicacion.UbicacionKey
+- BridgeContratoProveedor.ContratoKey -> FactContrato.ContratoKey
+- BridgeContratoProveedor.ProveedorKey -> DimProveedor.ProveedorKey
+"""
 
-REGLA DE NEGOCIO — RIESGO (MUY IMPORTANTE):
-No existe una columna llamada "score de riesgo". Cuando te pidan procesos/proveedores/entidades
-"con mas riesgo", "riesgosos", "mas peligrosos" o similar, el criterio correcto es:
-    SCORES_RIESGO.score_integridad MAS BAJO (ORDER BY score_integridad ASC)
-NUNCA ordenes por score_anomalia DESC pensando que eso es "riesgo" - score_anomalia mide
-anomalia estadistica, no riesgo de integridad, y son conceptos distintos.
-Si la pregunta menciona explicitamente "anomalia" usa score_anomalia DESC.
-Si menciona explicitamente "transparencia" usa score_transparencia ASC (mas baja = menos transparente).
+# ── Reglas para filtros de texto (evita 0 falsos por nombre incompleto) ──
+REGLAS_FILTROS_TEXTO = """
+REGLAS OBLIGATORIAS PARA FILTROS DE TEXTO (entidad, proveedor, buyer_name, proveedor_nombre):
+
+1. NUNCA uses el operador "=" para comparar nombres de entidad o proveedor.
+   Los nombres oficiales en la base de datos suelen incluir sufijos, siglas o
+   variantes (ej: "AGENCIA DE PROMOCION DE LA INVERSION PRIVADA - PROINVERSION")
+   que el usuario no escribe en su pregunta. Un "=" exacto casi siempre
+   devuelve 0 filas aunque la entidad exista.
+
+2. USA SIEMPRE "LIKE" con comodines en ambos extremos, sobre las palabras
+   clave mas distintivas de la pregunta, nunca la frase completa:
+   Correcto:   WHERE de.NombreEstandar LIKE '%PROMOCION%INVERSION%PRIVADA%'
+   Incorrecto: WHERE de.NombreEstandar = 'Agencia de Promocion de la Inversion Privada'
+   Incorrecto: WHERE de.NombreEstandar LIKE '%Agencia de Promocion de la Inversion Privada%'
+   (la frase completa como comodin es tan fragil como el "=" si falta o sobra
+   una palabra; usa solo 2-4 palabras clave separadas por %)
+
+3. Todos los filtros de texto deben ser insensibles a mayusculas/minusculas
+   y usar UPPER() en ambos lados de la comparacion:
+   WHERE UPPER(de.NombreEstandar) LIKE UPPER('%PROMOCION%INVERSION%PRIVADA%')
+
+4. Si la pregunta del usuario nombra una entidad o proveedor, NO copies el
+   texto del usuario tal cual dentro del LIKE. Extrae unicamente las 2-4
+   palabras mas especificas y descarta palabras genericas como "agencia",
+   "de", "la", "empresa", "publica"/"privada" si generan ambiguedad
+   (usa solo las palabras que identifican de forma unica a la entidad,
+   ej: "PROMOCION", "INVERSION", "PRIVADA" o "PROINVERSION").
+
+5. Esta misma regla aplica a TODOS los filtros de texto sin excepcion:
+   nombres de entidad, nombres de proveedor, categorias, departamentos,
+   o cualquier campo tipo string. Nunca coincidencia exacta salvo que el
+   usuario pida explicitamente un codigo o ID exacto (ej: RUC, codigo SEACE).
 """
 
 # ── Conexion a Azure SQL (via pymssql / FreeTDS) ────────────────
-# FIX: la conexión ya NO se comparte como variable global entre requests.
-# FastAPI ejecuta endpoints sync en threads del threadpool, así que compartir
-# un solo objeto pymssql.Connection entre threads concurrentes corrompe el
-# socket y produce exactamente los errores 20003 / 20047 que viste.
-# Ahora cada request abre su propia conexión y la cierra al terminar.
-# Si más adelante quieres pooling real, usa algo como sqlalchemy con un
-# QueuePool en vez de reabrir conexión por request.
-
-_conn_lock = threading.Lock()
-
+_conn = None
 
 def get_connection():
-    return pymssql.connect(
+    global _conn
+    try:
+        if _conn:
+            cur = _conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchall()
+            return _conn
+    except Exception:
+        _conn = None
+
+    _conn = pymssql.connect(
         server=DB_SERVER,
         user=DB_USER,
         password=DB_PASS,
         database=DB_NAME,
         as_dict=False,
         login_timeout=30,
-        timeout=60,  # subido de 30 a 60: joins de 5 tablas sin WHERE pueden tardar
+        timeout=30,
     )
+    return _conn
 
-
-def run_query(sql: str, max_intentos: int = 3) -> pd.DataFrame:
-    """
-    Reintenta en caso de timeout/conexión muerta. Esto cubre dos casos reales:
-    1. Azure SQL Serverless con auto-pause: el primer intento "despierta" la BD
-       y puede tardar >30-60s y fallar; el segundo intento ya la encuentra
-       despierta y responde rápido.
-    2. Cortes de red intermitentes entre Railway y Azure.
-    Si tras max_intentos sigue fallando, es un problema real de servidor/red,
-    no algo que un retry pueda arreglar (ver diagnóstico en el chat).
-    """
-    ultimo_error = None
-    for intento in range(max_intentos):
-        conn = None
-        try:
-            conn = get_connection()
-            return pd.read_sql(sql, conn)
-        except Exception as e:
-            ultimo_error = e
-            time.sleep(2 * (intento + 1))  # backoff: 2s, 4s, 6s
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-    raise ultimo_error
-
+def run_query(sql: str) -> pd.DataFrame:
+    return pd.read_sql(sql, get_connection())
 
 # ── Limpieza SQL ───────────────────────────────────────────────
 def limpiar_sql(sql: str) -> str:
@@ -173,7 +173,6 @@ def limpiar_sql(sql: str) -> str:
 
     return sql.strip()
 
-
 # ── Groq: pregunta → SQL ───────────────────────────────────────
 def pregunta_a_sql(pregunta: str, sql_con_error: str = None) -> str:
     client = Groq(api_key=GROQ_API_KEY)
@@ -185,35 +184,16 @@ def pregunta_a_sql(pregunta: str, sql_con_error: str = None) -> str:
 REGLAS CRITICAS:
 1. Responde SOLO con SQL puro, sin markdown, sin explicaciones
 2. TOP va SIEMPRE despues de SELECT: "SELECT TOP 100 col FROM tabla ORDER BY col DESC"
-3. Alias fijos: hp=HECHOS_PROCESO, sr=SCORES_RIESGO, de=DIM_ENTIDAD, dp=DIM_PROVEEDOR,
-   dpr=DIM_PROCEDIMIENTO, dt=DIM_TIEMPO
-4. Schema dbo. siempre antes del nombre de tabla (ej: dbo.HECHOS_PROCESO)
+3. Alias fijos: fc=FactContrato, de=DimEntidad, dp=DimProveedor, dfe=DimFecha,
+   du=DimUbicacion, dca=DimCategoria, dm=DimMetodoContratacion, dmo=DimMoneda, bcp=BridgeContratoProveedor
+4. Schema dw. siempre antes del nombre de tabla
 5. LIMIT no existe en SQL Server, usa TOP
 6. Si no puedes responder: SELECT 'No tengo datos para esa consulta' AS mensaje
-7. No existe una columna llamada "score de riesgo". Si te piden proveedores/entidades/
-   procesos con mayor riesgo, el criterio de negocio es: SCORES_RIESGO.score_integridad
-   MAS BAJO (ORDER BY score_integridad ASC), NO score_anomalia mas alto. Nunca ordenes
-   por score_anomalia DESC pensando que eso es "riesgo" - son conceptos distintos.
-8. Si la consulta cruza HECHOS_PROCESO con SCORES_RIESGO, siempre filtra o pon un TOP
-   razonable antes del ORDER BY cuando no haya WHERE, para evitar ordenar el dataset
-   completo en cada consulta.
-9. NUNCA devuelvas el ocid como unico identificador de un proceso. El ocid es una clave
-   tecnica, no le sirve al usuario para entender nada. Siempre que selecciones desde
-   HECHOS_PROCESO y/o SCORES_RIESGO, haz JOIN y trae tambien:
-   - de.buyer_name AS entidad (desde DIM_ENTIDAD)
-   - dp.proveedor_nombre AS proveedor (desde DIM_PROVEEDOR)
-   - dpr.metodo_detalle AS tipo_procedimiento (desde DIM_PROCEDIMIENTO) si aplica
-   - hp.monto_adjudicado AS monto (si aplica a la pregunta)
-   - dt.anio, dt.nombre_mes (si aplica a la pregunta, usando fecha_adjudicacion_key)
-   Puedes seguir incluyendo el ocid como columna adicional de referencia, pero jamas
-   como la unica columna identificadora del resultado.
-10. Por defecto, EXCLUYE filas con valores NULL o vacios en las columnas legibles
-    principales (de.buyer_name, dp.proveedor_nombre, hp.monto_adjudicado, etc.) agregando
-    condiciones tipo "AND de.buyer_name IS NOT NULL AND LTRIM(RTRIM(de.buyer_name)) <> ''".
-    Excepcion: si la pregunta pide explicitamente ver los registros sin identificar,
-    "no identificados", nulos, o similar, entonces SI incluyelos."""
+
+{REGLAS_FILTROS_TEXTO}"""
 
     messages = [{"role": "system", "content": system_prompt}]
+
     if sql_con_error:
         messages += [
             {"role": "user", "content": pregunta},
@@ -231,61 +211,45 @@ REGLAS CRITICAS:
     )
     return r.choices[0].message.content.strip()
 
-
 # ── Groq: datos → narrativa ────────────────────────────────────
 def interpretar_resultado(pregunta: str, df: pd.DataFrame) -> str:
-    if df.empty:
-        return (
-            "No encontré registros que coincidan con esa consulta. Puede ser que el "
-            "filtro sea muy específico o que no existan datos para ese criterio en el "
-            "dataset. *¿Quieres que lo intente con un criterio más amplio?*"
-        )
-
     client = Groq(api_key=GROQ_API_KEY)
-    datos_str = df.head(20).to_string(index=False)
-    n_total = len(df)
-    n_columnas = len(df.columns)
+
+    datos_str = df.head(20).to_string(index=False) if not df.empty else "Sin resultados"
 
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {
                 "role": "system",
-                "content": f"""Eres un analista senior de inteligencia de negocios especializado en contrataciones publicas del Peru (OSCE/SEACE 2022-2025).
+                "content": """Eres un analista senior de inteligencia de negocios especializado en contrataciones publicas del Peru (OSCE/SEACE 2022-2025).
 Redacta respuestas en forma de analisis narrativo ejecutivo, fluido y profesional en espanol.
-
-CONTEXTO DE LOS DATOS QUE VAS A RECIBIR:
-- Total de filas en el resultado: {n_total}
-- Total de columnas: {n_columnas}
-- Se te muestran hasta 20 filas de muestra; si {n_total} > 20, acláralo brevemente
-  ("de un total de {n_total} registros...") en vez de hablar como si solo hubiera 20.
-- Si el resultado tiene una sola fila o un solo valor (ej: un conteo, un promedio),
-  responde de forma directa y completa igual, sin forzar viñetas ni estructura de lista.
 
 ESTILO:
 - Escribe en prosa continua, sin etiquetas como "Analisis:", "Contexto:", "Hallazgos:"
 - Responde directamente con datos concretos: nombres, montos exactos, fechas, porcentajes
-- Prioriza SIEMPRE nombres legibles (entidad, proveedor) sobre codigos tecnicos como el
-  ocid. Si los datos traen ambos, menciona el nombre de la entidad/proveedor y omite el
-  ocid salvo que el usuario lo haya pedido explicitamente
-- CRITICO: nunca reinterpretes ni redondees mal una cifra. Si un valor en los datos es
-  5546901356.12, exprésalo como "S/ 5,547 millones" (dividiendo entre 1,000,000 tal cual),
-  jamas inventes otra magnitud como "54,669 millones". Verifica mentalmente la division
-  antes de escribirla.
-- Tu respuesta debe ser coherente con la pregunta original: si la pregunta pide un top 5,
-  no hables de 100 registros distintos; si pide una tendencia, describe la tendencia y no
-  solo un valor aislado. Relee la pregunta antes de responder.
 - Si hay multiples elementos destacados, usa viñetas breves SIN encabezados previos
 - Cuando detectes algo inusual (concentracion, montos atipicos, contratacion directa), menciónalo
 - Usa S/ para soles y US$ para dolares
 - Al final, en cursiva, sugiere una pregunta de profundizacion relevante
 - Maximo 200 palabras
 
+REGLA SOBRE RESULTADOS EN CERO:
+- Si el resultado tiene 0 filas y la pregunta involucraba un nombre de entidad
+  o proveedor, NO concluyas que "no hay actividad", que "es inusual" o que
+  "hay una posible omision en la informacion". Esa conclusion suele ser falsa:
+  lo mas probable es que el nombre de la entidad/proveedor no coincidio de
+  forma exacta con el registrado en la base de datos.
+- En ese caso, responde indicando que no se encontro una entidad o proveedor
+  que coincida con esas palabras clave, y sugiere al usuario verificar el
+  nombre exacto o intentar con una version mas corta (ej. solo el nombre
+  principal, sin sufijos ni siglas).
+
 PROHIBIDO: mencionar SQL, tablas, columnas, bases de datos."""
             },
             {
                 "role": "user",
-                "content": f"Pregunta: {pregunta}\n\nDatos ({n_total} registros totales, mostrando hasta 20):\n{datos_str}"
+                "content": f"Pregunta: {pregunta}\n\nDatos ({len(df)} registros):\n{datos_str}"
             }
         ],
         temperature=0.4,
@@ -293,11 +257,9 @@ PROHIBIDO: mencionar SQL, tablas, columnas, bases de datos."""
     )
     return r.choices[0].message.content.strip()
 
-
 # ── Modelos de request/response ────────────────────────────────
 class ChatRequest(BaseModel):
     pregunta: str
-
 
 class ChatResponse(BaseModel):
     respuesta: str
@@ -305,52 +267,18 @@ class ChatResponse(BaseModel):
     n_registros: int
     datos: list
 
-
 # ── Endpoints ──────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {"status": "ok", "servicio": "Chatbot OSCE - Contrataciones Publicas Peru"}
 
-
 @app.get("/health")
 def health():
     try:
-        conn = get_connection()
-        conn.cursor().execute("SELECT 1")
-        conn.close()
+        get_connection().cursor().execute("SELECT 1")
         return {"status": "ok", "db": "conectada"}
     except Exception as e:
         return {"status": "error", "db": str(e)}
-
-
-@app.get("/schema-check")
-def schema_check():
-    """
-    Endpoint de diagnostico temporal: devuelve el esquema REAL de la BD
-    conectada ahora mismo, para comparar contra SCHEMA_CONTEXT.
-    Bórralo cuando ya no lo necesites (no debería quedar expuesto en prod).
-    """
-    try:
-        conn = get_connection()
-        df = pd.read_sql(
-            """
-            SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
-            """,
-            conn,
-        )
-        conn.close()
-        return df.to_dict(orient="records")
-    except Exception as e:
-        raise HTTPException(500, f"No pude leer el schema: {e}")
-
-
-def es_error_de_conexion(error_msg: str) -> bool:
-    marcadores = ["20003", "20047", "connection timed out", "dbprocess is dead", "timeout"]
-    error_lower = error_msg.lower()
-    return any(m in error_lower for m in marcadores)
-
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
@@ -364,25 +292,14 @@ def chat(req: ChatRequest):
 
     for intento in range(3):
         try:
-            if sql is None or not es_error_de_conexion(str(ultimo_error or "")):
-                # primer intento, o el intento anterior falló por SQL malo -> regenerar
-                sql_raw = pregunta_a_sql(pregunta, sql if intento > 0 else None)
-                sql = limpiar_sql(sql_raw)
-            # si el intento anterior fue error de conexión, reusamos el mismo sql
-            # (ya era correcto, solo falló la conexión) y no gastamos otra llamada a Groq
-            df = run_query(sql, max_intentos=2)
+            sql_raw = pregunta_a_sql(pregunta, sql if intento > 0 else None)
+            sql = limpiar_sql(sql_raw)
+            df = run_query(sql)
             break
         except Exception as e:
             ultimo_error = str(e)
 
     if df is None:
-        if es_error_de_conexion(str(ultimo_error)):
-            raise HTTPException(
-                503,
-                "La base de datos no respondió a tiempo (posible cold-start de Azure SQL "
-                "o corte de red). El SQL generado era correcto, intenta de nuevo en unos "
-                f"segundos. Detalle: {ultimo_error}",
-            )
         raise HTTPException(500, f"No pude ejecutar la consulta: {ultimo_error}")
 
     respuesta = interpretar_resultado(pregunta, df)
