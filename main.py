@@ -72,6 +72,10 @@ dbo.DIM_PROVEEDOR
     proveedor_key (bigint, PK), proveedor_id (varchar), proveedor_nombre (varchar)
     es_consorcio (bit), prov_origen (varchar)
     prov_departamento (varchar), prov_provincia (varchar), prov_distrito (varchar)
+    NOTA: proveedor_key = 1 es un registro "desconocido" (proveedor_id = '(sin proveedor)',
+    proveedor_nombre = 'Proveedor no identificado'). Agrupa procesos donde no se pudo
+    identificar el proveedor en la fuente OCDS. No es un error de datos, es un valor
+    valido y esperado.
 
 dbo.DIM_PROCEDIMIENTO
     proc_key (bigint, PK), metodo (varchar), metodo_detalle (varchar), categoria (varchar)
@@ -202,7 +206,12 @@ REGLAS CRITICAS:
    - hp.monto_adjudicado AS monto (si aplica a la pregunta)
    - dt.anio, dt.nombre_mes (si aplica a la pregunta, usando fecha_adjudicacion_key)
    Puedes seguir incluyendo el ocid como columna adicional de referencia, pero jamas
-   como la unica columna identificadora del resultado."""
+   como la unica columna identificadora del resultado.
+10. Por defecto, EXCLUYE filas con valores NULL o vacios en las columnas legibles
+    principales (de.buyer_name, dp.proveedor_nombre, hp.monto_adjudicado, etc.) agregando
+    condiciones tipo "AND de.buyer_name IS NOT NULL AND LTRIM(RTRIM(de.buyer_name)) <> ''".
+    Excepcion: si la pregunta pide explicitamente ver los registros sin identificar,
+    "no identificados", nulos, o similar, entonces SI incluyelos."""
 
     messages = [{"role": "system", "content": system_prompt}]
     if sql_con_error:
@@ -225,16 +234,33 @@ REGLAS CRITICAS:
 
 # ── Groq: datos → narrativa ────────────────────────────────────
 def interpretar_resultado(pregunta: str, df: pd.DataFrame) -> str:
+    if df.empty:
+        return (
+            "No encontré registros que coincidan con esa consulta. Puede ser que el "
+            "filtro sea muy específico o que no existan datos para ese criterio en el "
+            "dataset. *¿Quieres que lo intente con un criterio más amplio?*"
+        )
+
     client = Groq(api_key=GROQ_API_KEY)
-    datos_str = df.head(20).to_string(index=False) if not df.empty else "Sin resultados"
+    datos_str = df.head(20).to_string(index=False)
+    n_total = len(df)
+    n_columnas = len(df.columns)
 
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {
                 "role": "system",
-                "content": """Eres un analista senior de inteligencia de negocios especializado en contrataciones publicas del Peru (OSCE/SEACE 2022-2025).
+                "content": f"""Eres un analista senior de inteligencia de negocios especializado en contrataciones publicas del Peru (OSCE/SEACE 2022-2025).
 Redacta respuestas en forma de analisis narrativo ejecutivo, fluido y profesional en espanol.
+
+CONTEXTO DE LOS DATOS QUE VAS A RECIBIR:
+- Total de filas en el resultado: {n_total}
+- Total de columnas: {n_columnas}
+- Se te muestran hasta 20 filas de muestra; si {n_total} > 20, acláralo brevemente
+  ("de un total de {n_total} registros...") en vez de hablar como si solo hubiera 20.
+- Si el resultado tiene una sola fila o un solo valor (ej: un conteo, un promedio),
+  responde de forma directa y completa igual, sin forzar viñetas ni estructura de lista.
 
 ESTILO:
 - Escribe en prosa continua, sin etiquetas como "Analisis:", "Contexto:", "Hallazgos:"
@@ -242,6 +268,13 @@ ESTILO:
 - Prioriza SIEMPRE nombres legibles (entidad, proveedor) sobre codigos tecnicos como el
   ocid. Si los datos traen ambos, menciona el nombre de la entidad/proveedor y omite el
   ocid salvo que el usuario lo haya pedido explicitamente
+- CRITICO: nunca reinterpretes ni redondees mal una cifra. Si un valor en los datos es
+  5546901356.12, exprésalo como "S/ 5,547 millones" (dividiendo entre 1,000,000 tal cual),
+  jamas inventes otra magnitud como "54,669 millones". Verifica mentalmente la division
+  antes de escribirla.
+- Tu respuesta debe ser coherente con la pregunta original: si la pregunta pide un top 5,
+  no hables de 100 registros distintos; si pide una tendencia, describe la tendencia y no
+  solo un valor aislado. Relee la pregunta antes de responder.
 - Si hay multiples elementos destacados, usa viñetas breves SIN encabezados previos
 - Cuando detectes algo inusual (concentracion, montos atipicos, contratacion directa), menciónalo
 - Usa S/ para soles y US$ para dolares
@@ -252,7 +285,7 @@ PROHIBIDO: mencionar SQL, tablas, columnas, bases de datos."""
             },
             {
                 "role": "user",
-                "content": f"Pregunta: {pregunta}\n\nDatos ({len(df)} registros):\n{datos_str}"
+                "content": f"Pregunta: {pregunta}\n\nDatos ({n_total} registros totales, mostrando hasta 20):\n{datos_str}"
             }
         ],
         temperature=0.4,
